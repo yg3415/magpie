@@ -11,6 +11,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -106,6 +107,40 @@ func AutoUseCodexReset(ctx context.Context, user string) (ResetOutcome, error) {
 		}
 		return weekUsedUp(windows, now), resets != nil && resets.Count > 0, nil
 	}, func() (ResetOutcome, error) { return UseCodexReset(ctx, who) })
+}
+
+// autoResetChecking: the accounts a look after an answer is running for,
+// so a run of answers starts one look, not one each.
+var autoResetChecking sync.Map
+
+// CheckCodexAutoReset looks, in the background, whether the Codex account
+// user just answered with its week used up, and spends a reset by itself if
+// so — as AutoUseCodexReset does, at most a look a minute. An account with
+// credits bought or given is answered past its week, the credits paying,
+// and never turned away, so waiting for the refusal (the gateway's 429)
+// spent the credits and never the resets.
+func CheckCodexAutoReset(user string) {
+	if !CodexAutoReset(user) {
+		return
+	}
+	key := strings.ToLower(user)
+	if _, busy := autoResetChecking.LoadOrStore(key, true); busy {
+		return
+	}
+	go func() {
+		defer autoResetChecking.Delete(key)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		out, err := AutoUseCodexReset(ctx, user)
+		switch {
+		case err != nil:
+			log.Printf("codex reset for %s not looked at after an answer: %v", user, err)
+		case out.Code == "reset":
+			log.Printf("codex reset used for %s, its week used up while answering: %s", user, out.Text())
+		case out.Code != "":
+			log.Printf("codex reset for %s not used: %s", user, out.Text())
+		}
+	}()
 }
 
 // use spends one of user's resets by itself if look finds its week used

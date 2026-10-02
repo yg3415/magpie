@@ -206,3 +206,57 @@ func TestCodexAutoResetNot(t *testing.T) {
 		})
 	}
 }
+
+// An account with credits is answered past its week, the credits paying,
+// and never refused: the reset is spent after the answer, in the
+// background, rather than never (the user: 有充值余额时，订阅用量耗尽后
+// 会自动使用额度，而不是重置次数). Not when the week isn't used up, nor
+// without the user's leave.
+func TestCodexAutoResetPaidByCredits(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		on    bool
+		week  float64
+		spent string
+	}{
+		{"week used up", true, 100, "acct-1"},
+		{"week not used up", true, 60, ""},
+		{"not turned on", false, 100, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			codexSignedIn(t)
+			b := newResetBackend(t, "acct-1")
+			b.out["acct-1"], b.week["acct-1"] = false, c.week // the credits pay
+			if c.on {
+				if err := provider.SetCodexAutoReset("me@example.com", true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srv := New()
+			code, body := resetPost(t, srv)
+			if code != 200 || !strings.Contains(body, "pong") {
+				t.Fatalf("%d %s", code, body)
+			}
+			var spent string
+			for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+				if _, spent = b.seen(); spent != "" {
+					break
+				}
+			}
+			if spent != c.spent {
+				t.Fatalf("spent %q, want %q", spent, c.spent)
+			}
+			if c.spent == "" {
+				return
+			}
+			// the next answers in the same week spend no other
+			for range 3 {
+				resetPost(t, srv)
+			}
+			time.Sleep(200 * time.Millisecond)
+			if _, spent := b.seen(); spent != "acct-1" {
+				t.Fatalf("spent again: %s", spent)
+			}
+		})
+	}
+}

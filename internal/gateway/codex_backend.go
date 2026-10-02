@@ -397,6 +397,13 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 	}
 	end(call.Status, call.Error, uu.Input+uu.Output+uu.CacheRead+uu.CacheWrite, uu.Output)
 	s.record(call)
+	if res.StatusCode < 400 && rest == "/responses" && base != codexAPIBase {
+		// answered past its week, credits paying, is never refused: looked
+		// at after the answer instead
+		if who, ok := provider.CodexSignedIn(); ok {
+			provider.CheckCodexAutoReset(who)
+		}
+	}
 	rec := usage.Record{RouteID: tr.ID, Time: start, Agent: call.Agent, Provider: call.Provider, Host: provider.HostOf(base), Model: call.Model,
 		Requested: call.Model, Served: served,
 		Input: uu.Input, Output: uu.Output, CacheRead: uu.CacheRead, CacheWrite: uu.CacheWrite,
