@@ -45,6 +45,21 @@ const (
 	iterations = 600_000
 )
 
+// isBackupJSON says whether data begins like a sealed backup: Seal writes
+// the envelope with MarshalIndent, so its head is a { then the format
+// field. Whitespace is dropped so the check holds whatever the indent. A
+// body that starts this way but won't parse whole is a backup cut short,
+// not some other answer a server gave.
+func isBackupJSON(data []byte) bool {
+	head := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, string(data))
+	return strings.HasPrefix(head, `{"format":"`+format+`"`)
+}
+
 // Bundle is what a backup holds.
 type Bundle struct {
 	Version     int                        `json:"version"`
@@ -62,6 +77,9 @@ type Bundle struct {
 	// Searches are the web search APIs (#419), their keys with the
 	// providers'; nil from a magpie before them.
 	Searches *[]provider.SearchAPI `json:"searches,omitempty"`
+	// Order is the order the user put the providers in (#499), by id;
+	// none from a magpie before it went, or when they were never arranged.
+	Order []string `json:"order,omitempty"`
 }
 
 type envelope struct {
@@ -77,6 +95,12 @@ type envelope struct {
 // ErrPassphrase is a passphrase that does not open the backup.
 var ErrPassphrase = errors.New("wrong passphrase, or the file was changed")
 
+// ErrCorrupt is a file that isn't a backup at all, or one cut short: its
+// JSON, format, or key-derivation fields don't read. It is told from a
+// wrong passphrase and from a newer magpie's file, so a sync can rebuild
+// the damaged one from this computer rather than fail on it forever.
+var ErrCorrupt = errors.New("not a magpie backup")
+
 // Collect gathers the bundle; without keys, providers carry none, nor any
 // header that looks like one, and the library's servers no environment
 // variable or header that looks like one (their names stay).
@@ -90,6 +114,9 @@ func Collect(keys bool, app string) (Bundle, error) {
 		return b, err
 	}
 	if b.Groups, err = provider.StoredGroups(); err != nil {
+		return b, err
+	}
+	if b.Order, err = provider.StoredOrder(); err != nil {
 		return b, err
 	}
 	if keys {
@@ -133,6 +160,7 @@ func Collect(keys bool, app string) (Bundle, error) {
 		if !keys {
 			s.LANKey, s.LANKeyID = "", ""
 			s.OTel.Headers = nil
+			s.GitHubToken = ""
 		}
 		b.Settings = &s
 	}
@@ -200,14 +228,26 @@ func Seal(b Bundle, pass string) ([]byte, error) {
 // Open decrypts a backup.
 func Open(data []byte, pass string) (Bundle, error) {
 	var e envelope
-	if json.Unmarshal(data, &e) != nil || e.Format != format {
+	if json.Unmarshal(data, &e) != nil {
+		// The JSON doesn't read whole. A backup a relay cut short ends in
+		// the middle of its sealed data and fails here, so this is the
+		// damaged-backup case — but so does any other non-JSON body a
+		// server answers with (a captive portal's sign-in page), and that
+		// isn't damage to rebuild over. Only a body that begins like a
+		// magpie backup counts as one; anything else is what it is.
+		if isBackupJSON(data) {
+			return Bundle{}, ErrCorrupt
+		}
+		return Bundle{}, errors.New("not a magpie backup")
+	}
+	if e.Format != format {
 		return Bundle{}, errors.New("not a magpie backup")
 	}
 	if e.Version != 1 || e.KDF != "pbkdf2-sha256" {
 		return Bundle{}, errors.New("this backup was made by a newer magpie; update magpie to open it")
 	}
 	if e.Iterations < 100_000 || e.Iterations > 10_000_000 || len(e.Nonce) != 12 || len(e.Salt) < 16 {
-		return Bundle{}, errors.New("not a magpie backup")
+		return Bundle{}, ErrCorrupt
 	}
 	gcm, err := aead(pass, e)
 	if err != nil {
@@ -231,10 +271,18 @@ func header(e envelope) []byte {
 }
 
 func aead(pass string, e envelope) (cipher.AEAD, error) {
-	key, err := pbkdf2.Key(sha256.New, pass, e.Salt, e.Iterations, 32)
+	key, err := deriveKey(pass, e)
 	if err != nil {
 		return nil, err
 	}
+	return gcmOf(key)
+}
+
+func deriveKey(pass string, e envelope) ([]byte, error) {
+	return pbkdf2.Key(sha256.New, pass, e.Salt, e.Iterations, 32)
+}
+
+func gcmOf(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -313,6 +361,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		s.KeepOwn(cur)
 		if !b.Keys {
 			s.LANKey, s.LANKeyID = cur.LANKey, cur.LANKeyID
+			s.GitHubToken = cur.GitHubToken
 			s.OTel.Headers = nil
 			if strings.TrimRight(strings.TrimSpace(s.OTel.Endpoint), "/") == cur.OTel.Endpoint {
 				s.OTel.Headers = cur.OTel.Headers

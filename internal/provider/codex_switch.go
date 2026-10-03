@@ -16,12 +16,15 @@ package provider
 // It moves at the share Smart routing counts an account spent at, so the
 // account the agent is signed in to and the one the gateway goes to agree
 // on which is out (#209): the sign-in follows Smart; Smart doesn't follow
-// the sign-in.
+// the sign-in. In order, the gateway goes to the first until it is used
+// up or refused, so the sign-in moves only once it is used up (#530).
 //
 // The account it moved from is the one the user made first, and it stays
 // that: once it is no longer low (backShare) the agent is signed back in
 // to it, as Smart gives it requests again then (#408). A switch the user
-// makes meanwhile ends that.
+// makes meanwhile ends that. With KeepLogin on the subscription, the agent
+// stays signed in to the first, whatever it has left (#524); with
+// KeepLoginAs, to that account, wherever it stands in the order.
 
 import (
 	"context"
@@ -29,8 +32,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -44,6 +49,29 @@ const loginSwitchEvery = 5 * time.Minute
 // request, and the agent signed in to it is signed in to another.
 const SpentShare = 98
 
+// SpentShareOf is the share past which routing counts an account spent:
+// SpentShare, but In order sends requests to the first until a window of it
+// is used up or the vendor refuses it, so there an account at 98% is still
+// tried in its turn (#530).
+func SpentShareOf(routing string) float64 {
+	if routing == Ordered {
+		return 100
+	}
+	return SpentShare
+}
+
+// loginSwitching is how magpie moves agent's sign-in, as its subscription
+// says: the share the account it is on is moved off at, and whether it is
+// kept on the first instead (KeepLogin).
+func loginSwitching(agent string) (share float64, keep bool) {
+	for _, p := range load().Providers {
+		if p.ID == agent {
+			return SpentShareOf(p.Routing), p.KeepLogin
+		}
+	}
+	return SpentShare, false
+}
+
 // backShare is the share below which the account magpie moved the agent
 // off is signed back in to: no longer low, as Smart counts it (the
 // gateway's lowShare), so it doesn't go back and forth at the edge.
@@ -56,12 +84,6 @@ var switchedAgents = []string{"codex", "claude"}
 // window that stops the account, for every model, at 100%.
 func usedUp(q SubscriptionQuota) bool {
 	return usedPast(q, 100)
-}
-
-// spent reports whether an account's allowance is all but used up, as
-// Smart routing counts it: a window for every model at SpentShare.
-func spent(q SubscriptionQuota) bool {
-	return usedPast(q, SpentShare)
 }
 
 func usedPast(q SubscriptionQuota, share float64) bool {
@@ -96,8 +118,23 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 			spares = append(spares, l)
 		}
 	}
+	// kept on an account of the user's choosing, the agent goes back to
+	// it whenever it is on another, and never moves off it (#524)
+	if as := keptAs(agent); as != "" {
+		i := slices.IndexFunc(ls, func(l Login) bool { return strings.EqualFold(l.User, as) })
+		if from == "" || strings.EqualFold(from, as) || i < 0 || ls[i].Lapsed != "" {
+			return "", "", false, false
+		}
+		return from, ls[i].User, true, true
+	}
 	if from == "" || len(spares) == 0 {
 		return "", "", false, false
+	}
+	// kept on the first, the agent goes back to it at once, however little
+	// that has left (#524)
+	share, keep := loginSwitching(agent)
+	if keep && first != nil && first.On && first.Lapsed == "" {
+		return from, first.User, true, true
 	}
 	u := LoginUsage(ctx, agent)
 	if first != nil && first.On && first.Lapsed == "" {
@@ -105,11 +142,22 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 			return from, first.User, true, true
 		}
 	}
-	if q, known := u[from]; !known || q.Error != "" || !spent(q) {
+	q, known := u[from]
+	if q.Provider == "claude" && q.AsOf != nil {
+		// An expired cached window cannot say whether this account is spent
+		// now. Keep other windows and the stored historical reading intact.
+		now := time.Now()
+		q.Windows = slices.DeleteFunc(slices.Clone(q.Windows), func(w QuotaWindow) bool {
+			return w.ResetsAt != nil && !w.ResetsAt.After(now)
+		})
+	}
+	// kept on the first, it stays there however little that has left; and
+	// it moves on at the share its routing counts the account spent at
+	if keep || !known || q.Error != "" || !usedPast(q, share) {
 		return "", "", false, false
 	}
 	for _, l := range spares {
-		if q, known := u[l.User]; known && q.Error == "" && !spent(q) {
+		if q, known := u[l.User]; known && q.Error == "" && !usedPast(q, share) {
 			return from, l.User, false, true
 		}
 	}
@@ -132,14 +180,19 @@ func SwitchWhenSpent(ctx context.Context, agent string) (string, error) {
 	}
 	if back {
 		setLoginReturn(agent, loginReturn{})
-		log.Printf("%s: %s has room again; signed it back in to it", agent, to)
+		if keptAs(agent) != "" {
+			log.Printf("%s: kept signed in to %s; signed it back in to it from %s", agent, to, from)
+		} else {
+			log.Printf("%s: %s has room again; signed it back in to it", agent, to)
+		}
 	} else {
 		if r.Back == "" {
 			r.Back = from
 		}
 		r.To = to
 		setLoginReturn(agent, r)
-		log.Printf("%s: %s has used %d%% or more of its allowance; signed it in to %s", agent, from, SpentShare, to)
+		share, _ := loginSwitching(agent)
+		log.Printf("%s: %s has used %g%% or more of its allowance; signed it in to %s", agent, from, share, to)
 	}
 	// the models the agent is offered are the new account's plan's
 	catalog.Touched()
@@ -201,6 +254,21 @@ func setLoginReturn(agent string, r loginReturn) {
 	}
 }
 
+// codexWasUsedUp is whether the account Codex is signed in to was out of
+// its allowance at the last look.
+var codexWasUsedUp atomic.Bool
+
+// noteCodexUsedUp tells the agents' files when the account Codex is signed
+// in to runs out of its allowance, or has it back: the Codex app sends
+// nothing at all for an account that is out, a magpie model's turn
+// included, so the agent package then makes magpie Codex's provider, and
+// puts it back beside the sign-in after (#540). Only a change is told.
+func noteCodexUsedUp(now bool) {
+	if codexWasUsedUp.Swap(now) != now {
+		catalog.Touched()
+	}
+}
+
 // KeepOnAnAccountWithRoom runs SwitchWhenSpent for Codex and Claude Code a
 // minute after it starts and every loginSwitchEvery after that, until ctx
 // ends.
@@ -220,6 +288,9 @@ func KeepOnAnAccountWithRoom(ctx context.Context) {
 			}
 			cancel()
 		}
+		c, cancel := context.WithTimeout(ctx, time.Minute)
+		noteCodexUsedUp(CodexUsedUp(c))
+		cancel()
 		t.Reset(loginSwitchEvery)
 	}
 }

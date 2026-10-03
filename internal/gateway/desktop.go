@@ -147,6 +147,16 @@ func desktopModels(entries []provider.Entry) []map[string]any {
 	for _, e := range entries {
 		names[desktopName(e)]++
 	}
+	// the tier each model stands in for: the user's pick (a model picked
+	// for two is tagged with the first, desktopTierTurn sends the other),
+	// else a Claude model's own
+	picked := DesktopTiers()
+	tierOf := map[string]string{}
+	for _, t := range DesktopTierNames {
+		if id := picked[t]; id != "" && tierOf[id] == "" {
+			tierOf[id] = t
+		}
+	}
 	data := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
 		m := modelObject(e)
@@ -158,9 +168,101 @@ func desktopModels(entries []provider.Entry) []map[string]any {
 		if m["id"] = claudeLooking(e); m["id"] != e.ID {
 			m["description"] = e.ID + " in magpie"
 		}
+		if t := tierOf[e.ID]; t != "" {
+			m["anthropic_family_tier"], m["is_family_default"] = t, true
+		} else if t := claudeTier(e.ID); t != "" && picked[t] == "" {
+			m["anthropic_family_tier"] = t
+		}
 		data = append(data, m)
 	}
 	return data
+}
+
+// Claude Desktop's Code tab runs Claude Code with ANTHROPIC_DEFAULT_<TIER>_MODEL
+// set to "" for every tier, unless the gateway's /v1/models tags a model
+// with anthropic_family_tier (shortnameIdentityOverrides in its app.asar,
+// 2.7032: the first so tagged, or the one also is_family_default). Untagged,
+// a subagent on "sonnet" or "haiku" asked for Claude Code's own
+// claude-sonnet-… and that, unserved, went to the chat's model: every
+// subagent ran on it, whatever its tier (WilianWeng on Discord). The user
+// picks a model per tier in magpie; a Claude model magpie serves stands in
+// for its own tier while its tier has none picked.
+var DesktopTierNames = []string{"opus", "sonnet", "haiku", "fable"}
+
+func desktopTiersPath() string { return filepath.Join(settings.Dir(), "claude-desktop.tiers.json") }
+
+// DesktopTiers is the catalog id picked for each of Claude Desktop's tiers.
+func DesktopTiers() map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(desktopTiersPath())
+	if err == nil {
+		json.Unmarshal(b, &out)
+	}
+	return out
+}
+
+// SetDesktopTier picks the model (a catalog id) Claude Desktop runs a tier
+// on; "" takes the pick away.
+func SetDesktopTier(tier, id string) error {
+	tiers := DesktopTiers()
+	if id == "" {
+		delete(tiers, tier)
+	} else {
+		tiers[tier] = id
+	}
+	if len(tiers) == 0 {
+		if err := os.Remove(desktopTiersPath()); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	b, _ := json.MarshalIndent(tiers, "", "  ")
+	if err := os.MkdirAll(settings.Dir(), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(desktopTiersPath(), append(b, '\n'), 0o600)
+}
+
+// DesktopCatalogID is the catalog id of a model as Claude Desktop names it:
+// one of its aliases or the catalog id itself.
+func DesktopCatalogID(id string) string {
+	if c, ok := aliased(id); ok {
+		return c
+	}
+	return id
+}
+
+// claudeTier is the tier a model id is a Claude model of (claude-opus-4-8,
+// a provider's anthropic/claude-sonnet-5), "" when it is none.
+func claudeTier(id string) string {
+	m := strings.ToLower(strings.TrimSuffix(id, "[1m]"))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	if !claudeFamily.MatchString(m) {
+		return ""
+	}
+	for _, t := range DesktopTierNames {
+		if strings.Contains(m, t) {
+			return t
+		}
+	}
+	return ""
+}
+
+// desktopTierTurn is the model picked for the tier of a Claude model
+// Desktop's Claude Code asked for by Claude Code's own id, which magpie
+// doesn't serve: a subagent on a tier no model is tagged for, or on one a
+// model picked for two tiers isn't tagged with. "" when there is none.
+func desktopTierTurn(asked string) string {
+	if !unserved(asked) || strings.Contains(asked, "/") {
+		return ""
+	}
+	t := claudeTier(asked)
+	if t == "" {
+		return ""
+	}
+	return DesktopTiers()[t]
 }
 
 func desktopName(e provider.Entry) string {
@@ -234,6 +336,9 @@ func desktopPickedPath() string { return filepath.Join(settings.Dir(), "claude-d
 func desktopTurn(asked string, body []byte) string {
 	if asked == "" {
 		return asked
+	}
+	if m := desktopTierTurn(asked); m != "" {
+		return m
 	}
 	tools := hasTools(body)
 	desktopPicked.Lock()

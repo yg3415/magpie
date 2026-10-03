@@ -45,8 +45,16 @@ func MiniMaxDir(home string) string {
 	return filepath.Join(home, ".minimax")
 }
 
-func miniMax(home string) *Agent {
-	dir := MiniMaxDir(home)
+func miniMax(home string) *Agent { return miniMaxAt(here(home), MiniMaxDir(home)) }
+
+// miniMaxIn is MiniMax Code's mcode in a WSL distro (see wsl.go): ~/.minimax,
+// as MINIMAX_DATA_DIR there isn't read.
+func miniMaxIn(at place) *Agent { return miniMaxAt(at, filepath.Join(at.home, ".minimax")) }
+
+// miniMaxAt is MiniMax Code with its data folder at dir, reaching the
+// gateway as at does.
+func miniMaxAt(at place, dir string) *Agent {
+	writeMiniMaxEntry := func(path string) error { return writeMiniMaxEntryAt(path, at.gw()) }
 	path := filepath.Join(dir, "config.yaml")
 	key := "minimax-code:" + path + ":"
 	get := func(k string) string { v, _ := edit.GetYAML(path, k); return v }
@@ -94,7 +102,7 @@ func miniMax(home string) *Agent {
 				return "MiniMax Code's " + mcodeEntry + " (config.yaml) is turned off, so it no longer reaches magpie"
 			}
 			return wiringOff("MiniMax Code", path, func(k string) (string, bool) { return edit.GetYAML(path, mcodeEntry+".options."+k) },
-				"baseURL", gateway.URL(), "apiKey", gateway.Token)
+				"baseURL", at.gw(), "apiKey", gateway.Token)
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
@@ -155,7 +163,11 @@ func miniMax(home string) *Agent {
 // catalog is now, over the one there: what magpie sets is set, a model gone
 // from the catalog goes, and every other key — the user's, MiniMax Code's —
 // stays with its comments. The file is written only when this changes it.
-func writeMiniMaxEntry(path string) error {
+func writeMiniMaxEntry(path string) error { return writeMiniMaxEntryAt(path, gateway.URL()) }
+
+// writeMiniMaxEntryAt is writeMiniMaxEntry for a MiniMax Code reaching the
+// gateway at gw.
+func writeMiniMaxEntryAt(path, gw string) error {
 	cur, _ := edit.GetYAMLText(path, mcodeEntry)
 	entry := &yaml.Node{Kind: yaml.MappingNode}
 	if cur != "" {
@@ -172,7 +184,7 @@ func writeMiniMaxEntry(path string) error {
 	yamlSet(entry, "api", "anthropic-messages")
 	opts := yamlMap(entry, "options")
 	yamlSet(opts, "apiKey", gateway.Token)
-	yamlSet(opts, "baseURL", gateway.URL())
+	yamlSet(opts, "baseURL", gw)
 	yamlSet(opts, "authMode", "api-key")
 	yamlSet(yamlMap(opts, "headers"), "User-Agent", mcodeUA)
 

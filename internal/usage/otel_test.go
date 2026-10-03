@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -46,6 +48,8 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 	r := Record{RouteID: 42, Time: time.Now(), Agent: "pi", Provider: "deepseek", Model: "deepseek-chat", Requested: "group/mine", Served: "deepseek-v4", Input: 10, CacheRead: 3, CacheWrite: 2, Output: 4, Reasoning: 1, Millis: 1200, TTFT: 200, Status: 200,
 		ProviderKeyName: "PRIVATE-ACCOUNT", ProviderKeyID: "PRIVATE-KEY", Session: "PRIVATE-SESSION", Via: "PRIVATE-HOST"}
 	Append(r)
+	r.Error, r.ErrType = "PRIVATE-ERROR", "PRIVATE-ERROR-TYPE"
+	Append(r) // an error in a stream whose HTTP status is already 200
 	r.Status = 502
 	Append(r)
 	stop() // drain without waiting for the periodic batch
@@ -91,8 +95,20 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	spans := traces.Resources[0].Scopes[0].Spans
-	if len(spans) != 2 || len(spans[0].TraceID) != 32 || spans[0].TraceID != spans[1].TraceID || len(spans[0].SpanID) != 16 || spans[0].SpanID == spans[1].SpanID || spans[0].Kind != 3 || spans[1].Status.Code != 2 {
+	if len(spans) != 3 || len(spans[0].TraceID) != 32 || spans[0].TraceID != spans[1].TraceID || len(spans[0].SpanID) != 16 || spans[0].SpanID == spans[1].SpanID || spans[0].Kind != 3 {
 		t.Fatalf("spans: %+v", spans)
+	}
+	for i, want := range []struct {
+		status    int
+		http, err string
+	}{{0, "200", ""}, {2, "200", "stream_error"}, {2, "502", "502"}} {
+		attrs := map[string]string{}
+		for _, a := range spans[i].Attributes {
+			attrs[a.Key] = a.Value["stringValue"] + a.Value["intValue"]
+		}
+		if spans[i].Status.Code != want.status || attrs["http.response.status_code"] != want.http || attrs["error.type"] != want.err {
+			t.Errorf("span %d: status=%d http=%q error.type=%q, want %+v", i, spans[i].Status.Code, attrs["http.response.status_code"], attrs["error.type"], want)
+		}
 	}
 	values := map[string]string{}
 	for _, a := range spans[0].Attributes {
@@ -110,6 +126,10 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 					Histogram struct {
 						Temporality int `json:"aggregationTemporality"`
 						Points      []struct {
+							Attributes []struct {
+								Key   string            `json:"key"`
+								Value map[string]string `json:"value"`
+							} `json:"attributes"`
 							Count   string    `json:"count"`
 							Sum     float64   `json:"sum"`
 							Buckets []string  `json:"bucketCounts"`
@@ -127,10 +147,21 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 	if len(ms) != 2 || ms[0].Name != "gen_ai.client.operation.duration" || ms[0].Unit != "s" || ms[0].Histogram.Temporality != 1 || ms[1].Name != "gen_ai.client.token.usage" {
 		t.Fatalf("metrics: %+v", ms)
 	}
+	categories := map[string]int{}
 	for _, p := range ms[0].Histogram.Points {
 		if p.Count != "1" || p.Sum != 1.2 || len(p.Buckets) != len(p.Bounds)+1 {
-			t.Fatalf("point: %+v", p)
+			t.Errorf("point: %+v", p)
 		}
+		errType := ""
+		for _, a := range p.Attributes {
+			if a.Key == "error.type" {
+				errType = a.Value["stringValue"]
+			}
+		}
+		categories[errType]++
+	}
+	if len(categories) != 3 || categories[""] != 1 || categories["stream_error"] != 1 || categories["502"] != 1 {
+		t.Errorf("metric error categories: %v, want one normal, one stream error and one HTTP 502", categories)
 	}
 }
 
@@ -304,5 +335,71 @@ func TestOTelRetryAfterBound(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// a call's bodies go only to the OTLP export (#538), never to usage.jsonl
+func TestBodiesStayOutOfTheLog(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	Append(Record{Time: time.Now(), Model: "m1", Status: 200, BodyIn: "PRIVATE-PROMPT", BodyOut: "PRIVATE-REPLY"})
+	b, err := os.ReadFile(Path())
+	if err != nil || !strings.Contains(string(b), `"model":"m1"`) || strings.Contains(string(b), "PRIVATE-") {
+		t.Fatalf("usage.jsonl: %s %v", b, err)
+	}
+}
+
+func TestOTelReplyText(t *testing.T) {
+	for _, c := range []struct{ body, want string }{
+		{`{"choices":[{"message":{"content":"hi"}}]}`, `{"choices":[{"message":{"content":"hi"}}]}`},
+		{"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"he\"}}\n\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"llo\"}}\n\n", "hello"},
+		{"data: {\"type\":\"response.output_text.delta\",\"delta\":\"he\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}\n\n" + BodyCut, "hello" + BodyCut},
+		{"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"t\"}]}}]}\n\n", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"t\"}]}}]}\n\n"},
+	} {
+		if got := otelReplyText(c.body); got != c.want {
+			t.Errorf("otelReplyText(%q) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
+// whole bodies (#538) are held by the queue within a byte budget, not by
+// record count alone: one past it is dropped as a full queue's is
+func TestOTelQueueBodiesBudget(t *testing.T) {
+	e := newOTelExporter()
+	defer e.cancel()
+	body := strings.Repeat("x", otelQueueBytes/2)
+	e.offer(otelItem{record: Record{BodyIn: body}})
+	e.offer(otelItem{record: Record{BodyIn: body}})
+	if got := e.bytes.Load(); got != int64(otelQueueBytes) {
+		t.Fatalf("held %d bytes, want %d", got, otelQueueBytes)
+	}
+	e.offer(otelItem{record: Record{BodyIn: "x"}})
+	if e.dropped.Load() != 1 {
+		t.Fatalf("dropped=%d, want 1", e.dropped.Load())
+	}
+}
+
+// Producers racing for the last bytes must reserve them atomically.
+func TestOTelQueueBodiesBudgetConcurrent(t *testing.T) {
+	body := strings.Repeat("x", 1<<10)
+	for range 100 {
+		e := newOTelExporter()
+		e.bytes.Store(otelQueueBytes - int64(len(body)))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 32 {
+			wg.Go(func() {
+				<-start
+				e.offer(otelItem{record: Record{BodyIn: body}})
+			})
+		}
+		close(start)
+		wg.Wait()
+		e.cancel()
+		if got := e.bytes.Load(); got != otelQueueBytes {
+			t.Fatalf("held %d bytes, want %d", got, otelQueueBytes)
+		}
+		if len(e.queue) != 1 || e.dropped.Load() != 31 {
+			t.Fatalf("queued=%d dropped=%d, want 1 and 31", len(e.queue), e.dropped.Load())
+		}
 	}
 }

@@ -65,28 +65,46 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator("#prefs").click();
       const row = page.locator("#sessionTerminalRow");
       await row.waitFor({ state: "visible" });
+      // the app's own menu, not a native select
       const select = page.locator("#sessionTerminalSelect");
-      assert.deepEqual(await select.locator("option").allTextContents(),
-        lang === "zh" ? ["系统默认（Terminal）", "Ghostty"] : ["System default (Terminal)", "Ghostty"]);
-      assert.equal(await select.inputValue(), "system");
+      assert.equal(await page.locator("#sessionTerminalRow select").count(), 0, "no native select");
+      const names = async () => {
+        await select.click();
+        await page.locator(".proto-menu").waitFor();
+        const got = (await page.locator(".proto-menu .pm-item .pm-name").allTextContents()).map((s) => s.trim());
+        await select.click();
+        assert.equal(await page.locator(".proto-menu").count(), 0, "a second click closes it");
+        return got;
+      };
+      const choose = async (name) => {
+        await select.click();
+        await page.locator(".proto-menu .pm-item", { hasText: name }).click();
+        assert.equal(await page.locator(".proto-menu").count(), 0, "a pick closes it");
+      };
+      assert.deepEqual(await names(), lang === "zh" ? ["系统默认（Terminal）", "Ghostty"] : ["System default (Terminal)", "Ghostty"]);
+      assert.equal(await select.getAttribute("data-value"), "system");
+      assert.equal((await select.textContent()).trim(), lang === "zh" ? "系统默认（Terminal）" : "System default (Terminal)");
+      const top = await page.evaluate(() => document.scrollingElement.scrollTop);
 
-      await select.selectOption("com.mitchellh.ghostty");
-      await page.waitForFunction(() => document.querySelector("#sessionTerminalSelect").value === "com.mitchellh.ghostty");
+      await choose("Ghostty");
+      assert.equal(await page.evaluate(() => document.scrollingElement.scrollTop), top, "the page doesn't move");
+      await page.waitForFunction(() => document.querySelector("#sessionTerminalSelect").dataset.value === "com.mitchellh.ghostty");
+      assert.equal((await select.textContent()).trim(), "Ghostty");
       await page.locator("#themeSegs .opt").last().click();
       await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
       assert.equal(posts.at(-1).sessionTerminal, "com.mitchellh.ghostty");
       await page.reload();
       await page.locator("#prefs").click();
       await row.waitFor({ state: "visible" });
-      assert.equal(await select.inputValue(), "com.mitchellh.ghostty");
+      assert.equal(await select.getAttribute("data-value"), "com.mitchellh.ghostty");
       const savedSystem = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "POST");
-      await select.selectOption("system");
+      await choose(lang === "zh" ? "系统默认" : "System default");
       await savedSystem;
       assert.equal(posts.at(-1).sessionTerminal, "");
       await page.reload();
       await page.locator("#prefs").click();
       await row.waitFor({ state: "visible" });
-      assert.equal(await select.inputValue(), "system");
+      assert.equal(await select.getAttribute("data-value"), "system");
       await page.setViewportSize({ width: 520, height: 700 });
       assert.equal(await row.evaluate((element) => element.scrollWidth > element.clientWidth), false);
       assert.deepEqual(errors, []);
@@ -103,7 +121,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/");
       await page.locator("#prefs").click();
       await page.locator("#sessionTerminalRow").waitFor({ state: "visible" });
-      assert.deepEqual(await page.locator("#sessionTerminalSelect option").allTextContents(),
+      await page.locator("#sessionTerminalSelect").click();
+      assert.deepEqual((await page.locator(".proto-menu .pm-item .pm-name").allTextContents()).map((s) => s.trim()),
         lang === "zh" ? ["系统默认（Terminal）", "Ghostty"] : ["System default (Terminal)", "Ghostty"]);
     });
   }

@@ -25,7 +25,7 @@ func TestAutoGroupsSameModel(t *testing.T) {
 		e("openrouter", "anthropic/claude-opus-5.5", "anthropic/claude-opus-5.5"),
 		e("copilot", "claude-opus-5.5", "claude-opus-5.5"),
 		e("claude", "claude-opus-5-5", "Claude Opus 5.5"),
-	})
+	}, nil)
 	if len(gs) != 1 || gs[0].ID != "auto-claude-opus-5-5" || len(gs[0].Members) != 3 || gs[0].Name != "Claude Opus 5.5" {
 		t.Fatalf("groups: %+v", gs)
 	}

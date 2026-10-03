@@ -51,6 +51,22 @@ func Searcher() string {
 	return ""
 }
 
+// AutoSearcher names the provider and model magpie picks to search with
+// when Settings names none, "" when none can.
+func AutoSearcher() string {
+	if p, m, ok := autoSearcher(); ok {
+		return p.Name + " · " + m
+	}
+	return ""
+}
+
+// SearcherUnused is why the searcher Settings names isn't used (one of
+// the Searcher* reasons), "" when it is or none is named.
+func SearcherUnused() string {
+	_, _, why := chosenSearcher()
+	return why
+}
+
 // apiSearch asks the search APIs, in their order, until one answers.
 func (s *Server) apiSearch(ctx context.Context, query string) (string, []Hit, error) {
 	var errs []error

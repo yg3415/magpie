@@ -21,8 +21,14 @@ import (
 // ccEfforts are the reasoning levels Command Code knows.
 var ccEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 
-func commandCode(home string) *Agent {
-	dir := filepath.Join(home, ".commandcode")
+func commandCode(home string) *Agent { return commandCodeIn(here(home)) }
+
+// commandCodeIn is Command Code at a place: this machine's home, or a WSL
+// distro's (see wsl.go), its provider naming the gateway as the distro
+// reaches it.
+func commandCodeIn(at place) *Agent {
+	ccProviderJSON := func() any { return ccProviderJSONAt(at.v1()) }
+	dir := filepath.Join(at.home, ".commandcode")
 	path := filepath.Join(dir, "settings.json")
 	providers := filepath.Join(dir, "providers.json")
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
@@ -54,7 +60,7 @@ func commandCode(home string) *Agent {
 				return "Command Code's modelProvider (settings.json) is " + orDefault(p) + ", so it no longer asks magpie"
 			}
 			return wiringOff("Command Code", providers, func(k string) (string, bool) { return edit.GetJSON(providers, "provider."+magpieID+"."+k) },
-				"baseURL", gatewayV1())
+				"baseURL", at.v1())
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
@@ -140,7 +146,11 @@ func commandCode(home string) *Agent {
 
 // ccProviderJSON is magpie's entry in providers.json. The key is false:
 // the gateway takes any, and Command Code refuses one written out.
-func ccProviderJSON() any {
+func ccProviderJSON() any { return ccProviderJSONAt(gatewayV1()) }
+
+// ccProviderJSONAt is ccProviderJSON for a Command Code reaching the
+// gateway's /v1 at v1.
+func ccProviderJSONAt(v1 string) any {
 	ms := map[string]any{}
 	for _, m := range magpieModels("commandcode") {
 		e := map[string]any{"name": m.Name}
@@ -156,7 +166,7 @@ func ccProviderJSON() any {
 		}
 		ms[m.ID] = e
 	}
-	return map[string]any{"name": "magpie", "api": "openai-completions", "baseURL": gatewayV1(), "apiKey": false, "models": ms}
+	return map[string]any{"name": "magpie", "api": "openai-completions", "baseURL": v1, "apiKey": false, "models": ms}
 }
 
 // ccEffortMap is settings.json's reasoningEffort, model id to effort.

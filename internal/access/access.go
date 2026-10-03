@@ -37,9 +37,15 @@ type Key struct {
 	LAN    bool   `json:"lan,omitempty"` // default key and durable migration marker
 	Secret string `json:"secret,omitempty"`
 	Masked string `json:"masked,omitempty"`
+	// Limit is the key's own budget (#585); nil for none.
+	Limit *Limit `json:"limit,omitempty"`
 }
 
-type Identity struct{ KeyID, KeyName string }
+// Identity is the gateway key a request came with, and its budget.
+type Identity struct {
+	KeyID, KeyName string
+	Limit          *Limit
+}
 type contextKey struct{}
 
 func WithIdentity(ctx context.Context, who Identity) context.Context {
@@ -111,6 +117,8 @@ func random(n int) (string, error) {
 type Change struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
+	// Limit is what "limit-key" sets; nil or Unlimited takes the limit off.
+	Limit *Limit `json:"limit,omitempty"`
 }
 
 // Update writes the named key store atomically.
@@ -159,6 +167,12 @@ func Update(action string, in Change) (string, error) {
 			keys[i].Secret = secret
 		case "rename-key":
 			keys[i].Name = name
+		case "limit-key":
+			lim, err := in.Limit.Valid()
+			if err != nil {
+				return "", err
+			}
+			keys[i].Limit = lim
 		case "on-key", "off-key":
 			keys[i].Off = action == "off-key"
 		case "remove-key":
@@ -173,7 +187,7 @@ func Update(action string, in Change) (string, error) {
 		default:
 			return "", fmt.Errorf("unknown key action %q", action)
 		}
-		if defaultKey && action != "remove-key" && action != "rename-key" {
+		if defaultKey && action != "remove-key" && action != "rename-key" && action != "limit-key" {
 			mirror = &keys[i]
 		}
 	}
@@ -220,7 +234,7 @@ func Authenticate(secret string) (Identity, bool) {
 			if k.Off {
 				return Identity{}, false
 			}
-			return Identity{k.ID, k.Name}, true
+			return Identity{k.ID, k.Name, k.Limit}, true
 		}
 	}
 	s := settings.Load()
@@ -228,7 +242,7 @@ func Authenticate(secret string) (Identity, bool) {
 	// fall back after either durable marker exists, or to a revoked mirror.
 	if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) && subtle.ConstantTimeCompare([]byte(secret), []byte(s.LANKey)) == 1 {
 		k := legacyLANKey(s.LANKey)
-		return Identity{k.ID, k.Name}, true
+		return Identity{KeyID: k.ID, KeyName: k.Name}, true
 	}
 	return Identity{}, false
 }

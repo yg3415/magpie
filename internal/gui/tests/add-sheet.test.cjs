@@ -37,14 +37,14 @@ const providers = [
   prov("claude", "Claude", { preset: "", account: { agent: "claude", logins: [{ user: "a" }, { user: "b" }] } }),
 ];
 
-function server(lang) {
+function server(lang, list = providers) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:false};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
-    if (url.pathname === "/api/providers") return json({ providers, presets, excluded: [], gateway: { running: true, window: true } });
+    if (url.pathname === "/api/providers") return json({ providers: list, presets, excluded: [], gateway: { running: true, window: true } });
     if (url.pathname === "/api/groups") return json({ groups: [], pools: [] });
     if (url.pathname === "/api/gateway/trace") return json({ routes: [] });
     if (url.pathname.startsWith("/api/")) return json({});
@@ -78,9 +78,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang));
         await page.goto("http://magpie.test/?view=providers");
+        // Direct editor actions must not open an unrequested add sheet on cancel.
+        for (const label of [lang === "zh" ? "复制" : "Duplicate", lang === "zh" ? "再添加一个 Anthropic" : "Add another Anthropic"]) {
+          await page.locator('#providers .row[data-id="anthropic"]').click();
+          await page.locator("#modal .bar").getByRole("button", { name: label, exact: true }).click();
+          await page.locator("#modal .editor.new").waitFor();
+          assert(await page.locator("#addSheet").isHidden(), "direct editor leaves sheet closed");
+          await page.keyboard.press("Escape");
+          await page.locator("#modal").waitFor({ state: "hidden" });
+          assert(await page.locator("#addSheet").isHidden(), "cancel returns to list");
+        }
         await page.locator("#addProvider").click();
         const sheet = page.locator("#addSheet");
         await sheet.locator(".tile").first().waitFor();
+        await sheet.evaluate(el => Promise.all(el.getAnimations().map(a => a.finished)));
 
         // the sections, each a name and a word on what it is
         const kinds = await sheet.locator(".kind").evaluateAll((ks) => ks.map((k) => [k.querySelector("b").textContent, k.querySelector("span")?.textContent || ""]));
@@ -181,6 +192,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(sc < 1);
         await page.locator("#modal").waitFor({ state: "hidden" });
 
+        assert(await row("Kimi").evaluate(e => e === document.activeElement), "return focus to the re-rendered option");
+        // Keyboard activation and a mouse close also restore the option.
+        await row("Kimi").focus();
+        await page.keyboard.press("Enter");
+        await page.locator("#modal .editor.new").waitFor();
+        await page.locator("#modal").click({ position: { x: 2, y: 2 } });
+        await page.locator("#modal").waitFor({ state: "hidden" });
+        assert(await row("Kimi").evaluate(e => e === document.activeElement));
+
         // a row opens what it did: a new preset's editor, grown out of the row on a spring
         await row("DeepSeek").click();
         await page.locator(".editor.new .ehead b", { hasText: "DeepSeek" }).waitFor();
@@ -194,6 +214,26 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(Math.abs(at.y + at.height / 2 + gy - (deep.y + deep.height / 2)) < 2, "from DeepSeek's row down");
         assert.deepEqual(errors, []);
         await page.context().close();
+
+        // First use in the tray: Escape clears search without hiding the window.
+        const firstUse = await (await browser.newContext({ viewport: { width: 560, height: 720 } })).newPage();
+        const hides = [];
+        firstUse.on("request", r => { if (new URL(r.url()).pathname === "/api/window/hide") hides.push(r.url()); });
+        await firstUse.route("**/*", server(lang, []));
+        await firstUse.goto("http://magpie.test/?mode=panel");
+        // The tray has no provider tab; exercise the first-use provider view
+        // with the real panel key handlers still installed.
+        await firstUse.evaluate(() => show("providers"));
+        const search = firstUse.locator("#addSheet .find");
+        await search.fill("deep");
+        await firstUse.keyboard.press("Escape");
+        assert.equal(await search.inputValue(), "");
+        assert(await search.isVisible());
+        await firstUse.keyboard.press("Escape");
+        await firstUse.waitForTimeout(150);
+        assert.deepEqual(hides, [], "search Escape never hides the tray");
+        assert(await search.evaluate(e => e === document.activeElement));
+        await firstUse.context().close();
       });
     }
   });

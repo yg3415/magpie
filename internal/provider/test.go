@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -33,7 +34,7 @@ type Result struct {
 // sees, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
 	ctx = p.Via(ctx)
-	if p.Decides() {
+	if p.DecideOnly() {
 		return p.testDecide(ctx)
 	}
 	p.Fetch(ctx)
@@ -51,6 +52,9 @@ func (p Provider) Test(ctx context.Context) []Result {
 		url, body := tiny(q, proto, UpstreamName(p, model))
 		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model, testWait))
 	}
+	if p.Decides() {
+		out = append(out, p.testDecide(ctx)...)
+	}
 	return out
 }
 
@@ -64,7 +68,55 @@ func tiny(q Provider, proto Protocol, model string) (url, body string) {
 	if q.OpenCodeFree(model) && body != "" {
 		body = zenFreeProbe(proto, body)
 	}
+	if q.IsCline() && body != "" {
+		body = clineProbe(body)
+	}
 	return url, body
+}
+
+// clineProbe is the smallest request asked as Cline's own clients ask:
+// streamed, with room for the model to think before it answers. Cline's
+// free models reason first, and asked for 16 tokens without a stream the
+// Cline API answered 500 "empty response content" (ARNO on Discord) while
+// an agent's request to the same model was answered. probe stops reading
+// at the model's first word, so the room is not spent.
+func clineProbe(body string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(body), &m) != nil {
+		return body
+	}
+	m["stream"] = true
+	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if _, ok := m[k]; ok {
+			m[k] = 1024
+		}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return string(b)
+}
+
+// ModelTest says why p's models can't each be sent a test request ("" when
+// they can): "decide" for a decision API, whose models only classify and
+// whose endpoint Test asks it for them; "own-api" for a sign-in reached
+// through its agent's own API (Cursor, Devin, Kiro, Zed, Qoder, a Google
+// sign-in), which the gateway translates every request for, so a probe
+// has no endpoint to go to.
+func (p Provider) ModelTest() string {
+	if p.DecideOnly() {
+		return "decide"
+	}
+	if p.isClaudeAccount() {
+		return ""
+	}
+	for _, pr := range p.Speaks() {
+		if pr == Chat || pr == Responses || pr == Anthropic {
+			return ""
+		}
+	}
+	return "own-api"
 }
 
 func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
@@ -75,9 +127,12 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 		}
 		return q.Chat + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 	case Responses:
-		return q.Responses + "/responses", fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
+		return q.Responses + "/responses", fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`, model)
 	case Anthropic:
 		return q.Anthropic + "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+	case Gemini:
+		// Factory's generate route. droid sends no stream field.
+		return q.Base(Gemini) + "/generate", fmt.Sprintf(`{"model":%q,"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, model)
 	}
 	return "", ""
 }
@@ -135,11 +190,11 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 	}
 	var protos []Protocol
 	for _, pr := range p.Speaks() {
-		if pr == Chat || pr == Responses || pr == Anthropic {
+		if pr == Chat || pr == Responses || pr == Anthropic || pr == Gemini {
 			protos = append(protos, pr)
 		}
 	}
-	if len(protos) == 0 {
+	if len(protos) == 0 || p.DecidesModel(model) {
 		return Result{Model: model, Error: "this provider can't be sent a test request"}
 	}
 	// the endpoint the vendor's list says serves it, else Anthropic's for a
@@ -237,7 +292,7 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
+				if !p.DecidesModel(m.ID) && want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}
@@ -296,6 +351,12 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	if p.IsOpenCode() {
 		OpenCodeClient(req.Header, "")
 	}
+	if p.IsCline() {
+		ClineClient(req.Header)
+	}
+	if p.IsKilo() {
+		KiloClient(req.Header, p.Key, "")
+	}
 	if err := p.Sign(ctx, req, proto, body); err != nil {
 		r.Error = err.Error()
 		return r
@@ -310,12 +371,81 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 	defer res.Body.Close()
 	r.Status = res.StatusCode
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
+		// a stream is answered 200 before the model has said anything, and
+		// can still fail in it: read on to its first word or its error
+		if streams(body) {
+			if msg, failed := streamAnswer(res.Body); failed {
+				r.Error = msg
+				return r
+			}
+		}
 		r.OK = true
 		return r
 	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	r.Error = APIError(b, res.Status)
 	return r
+}
+
+// streams reports whether a request body asks for a stream.
+func streams(body []byte) bool {
+	var v struct {
+		Stream bool `json:"stream"`
+	}
+	return json.Unmarshal(body, &v) == nil && v.Stream
+}
+
+// streamAnswer reads a streamed answer up to the first thing the model
+// says — a word, a thought or a tool call, in Chat's, Responses' or
+// Anthropic's events — and reports an error the stream gives before that.
+// A stream that ends with neither was answered, as a 200 always was.
+func streamAnswer(r io.Reader) (msg string, failed bool) {
+	sc := bufio.NewScanner(io.LimitReader(r, 1<<20))
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
+	for sc.Scan() {
+		data, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "data:")
+		if !ok {
+			continue
+		}
+		data = strings.TrimSpace(data)
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var ev struct {
+			Type     string          `json:"type"`
+			Error    json.RawMessage `json:"error"`
+			Response struct {
+				Error json.RawMessage `json:"error"`
+			} `json:"response"`
+			Choices []struct {
+				Delta map[string]any `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			continue
+		}
+		if ev.Type == "error" || len(ev.Error) > 0 && string(ev.Error) != "null" {
+			return APIError([]byte(data), "error in the stream"), true
+		}
+		if ev.Type == "response.failed" {
+			if len(ev.Response.Error) > 0 && string(ev.Response.Error) != "null" {
+				return APIError([]byte(`{"error":`+string(ev.Response.Error)+`}`), "response failed"), true
+			}
+			return "response failed", true
+		}
+		if ev.Type == "content_block_start" || ev.Type == "content_block_delta" || ev.Type == "response.output_item.added" ||
+			strings.HasPrefix(ev.Type, "response.") && strings.HasSuffix(ev.Type, ".delta") {
+			return "", false
+		}
+		for _, c := range ev.Choices {
+			for _, k := range []string{"content", "reasoning", "reasoning_content", "tool_calls"} {
+				if v, ok := c.Delta[k]; ok && v != nil && v != "" {
+					return "", false
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 // BlockedHint is what a vendor's edge firewall blocking magpie's address

@@ -1,24 +1,49 @@
 // Package shortcut puts magpie in the Start menu on Windows. There it is
-// one portable exe with no installer, so nothing else would: each start of
-// the desktop app points a Magpie shortcut in the user's Start menu at the
-// exe it runs as, and Windows search finds it by that. Elsewhere it does
-// nothing — the Mac has the app in Applications, Linux its own ways.
+// one exe with no installer, so nothing else would: the first start of the
+// desktop app makes a Magpie shortcut in the user's Start menu opening the
+// exe it runs as, and Windows search finds it by that. It is made once:
+// magpie remembers it did, and a shortcut the user deleted stays deleted
+// (#508); one still there is pointed at the exe again when that was moved.
+// A portable magpie (a data folder beside it) makes none and registers
+// nothing, leaving no trace on the machine. Elsewhere it does nothing —
+// the Mac has the app in Applications, Linux its own ways.
 package shortcut
 
 import (
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/yetone/magpie/internal/appdir"
 )
 
 // Name is what the shortcut is called, and what Windows search finds.
 const Name = "Magpie"
 
-// Ensure has the shortcut point at this magpie, when it doesn't yet. It
-// fails quietly — magpie runs the same without one — and is skipped with
-// MAGPIE_NO_SHORTCUT=1 (tests, sandboxes).
+// StateName is the file in magpie's folder recording that the shortcut was
+// made, and for which exe.
+const StateName = "start-menu-shortcut"
+
+// what Ensure asks of the system; the tests put fakes in
+var (
+	// startMenu is where the shortcut goes (…\Start Menu\Programs\Magpie.lnk)
+	startMenu = startMenuLink
+	// writeLink has the shortcut at lnk open exe, and reports whether it had to
+	writeLink = writeShortcut
+	// register has Win+R and `start magpie` find exe
+	register = registerAppPath
+	// registered reports whether a magpie registered itself there before
+	registered = registeredAppPath
+)
+
+// Ensure makes the shortcut on the first start, keeps it pointed at this
+// magpie after that while it is there, and never makes it again once the
+// user deleted it. A portable magpie makes none. It fails quietly — magpie
+// runs the same without one — and is skipped with MAGPIE_NO_SHORTCUT=1
+// (tests, sandboxes).
 func Ensure() {
 	if os.Getenv("MAGPIE_NO_SHORTCUT") == "1" {
 		return
@@ -30,9 +55,55 @@ func Ensure() {
 	if p, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = p
 	}
-	if err := ensure(Target(exe)); err != nil {
+	if err := ensure(Target(exe), appdir.Portable(), filepath.Join(appdir.Config(), StateName)); err != nil {
 		log.Println("start menu shortcut:", err)
 	}
+}
+
+// errNoStartMenu is startMenu's answer where there is none (off Windows).
+var errNoStartMenu = errors.New("no Start menu here")
+
+// ensure is Ensure for exe, portable being the data folder of a portable
+// magpie ("" installed) and state the file remembering the shortcut was
+// made.
+func ensure(exe, portable, state string) error {
+	if portable != "" {
+		return nil
+	}
+	lnk, err := startMenu()
+	if errors.Is(err, errNoStartMenu) {
+		return nil
+	}
+	// a magpie from before the state file registered itself at every start
+	before := registered()
+	register(exe)
+	if err != nil {
+		return err
+	}
+	_, gone := os.Stat(lnk)
+	if gone != nil {
+		if _, err := os.Stat(state); err == nil {
+			// made once already: the user deleted it, and it stays deleted
+			return nil
+		}
+		if before {
+			// an older magpie made it at its every start, and it is gone:
+			// the user deleted it, so it isn't made again now either
+			return remember(state, exe)
+		}
+	}
+	if _, err := writeLink(lnk, exe); err != nil {
+		return err
+	}
+	return remember(state, exe)
+}
+
+// remember records in state that the shortcut was made, for exe.
+func remember(state, exe string) error {
+	if err := os.MkdirAll(filepath.Dir(state), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(state, []byte(exe+"\n"), 0o644)
 }
 
 // aside is what an update moves the exe it replaces to, or stages the new

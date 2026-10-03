@@ -91,10 +91,18 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 		}
 		return q
 	}
-	if !passing.MatchString(q.Error) {
+	if q.Provider == "claude" && claudeUsageDenied.MatchString(q.Error) {
 		return q
 	}
-	out, ok := c.reading(key)
+	claudeUnavailable := q.Provider == "claude" && q.Error == errClaudeUsageUnavailable.Error()
+	if !claudeUnavailable && !passing.MatchString(q.Error) {
+		return q
+	}
+	read := c.reading
+	if claudeUnavailable {
+		read = c.reported // keep the reported values, even after their reset
+	}
+	out, ok := read(key)
 	if !ok {
 		return q
 	}
@@ -119,6 +127,16 @@ func (c *lastQuotasT) load() {
 // reading is the last reading kept under key, its windows as they stand
 // now. Called with c held.
 func (c *lastQuotasT) reading(key string) (SubscriptionQuota, bool) {
+	out, ok := c.reported(key)
+	if ok {
+		out.Windows = elapsed(out.Windows, time.Now())
+	}
+	return out, ok
+}
+
+// reported is the dated snapshot, without treating a passed reset as a
+// newly read zero. Called with c held.
+func (c *lastQuotasT) reported(key string) (SubscriptionQuota, bool) {
 	e, ok := c.m[key]
 	if !ok {
 		return SubscriptionQuota{}, false
@@ -131,7 +149,6 @@ func (c *lastQuotasT) reading(key string) (SubscriptionQuota, bool) {
 			out.Windows[i].Span, out.Windows[i].Model, out.Windows[i].Aside = e.Spans[i].Span, e.Spans[i].Model, e.Spans[i].Aside
 		}
 	}
-	out.Windows = elapsed(out.Windows, time.Now())
 	at := e.At
 	out.AsOf = &at
 	return out, true

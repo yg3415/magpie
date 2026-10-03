@@ -99,3 +99,68 @@ func inkIn(img image.Image, r image.Rectangle, dark bool) int {
 	}
 	return n
 }
+
+// A coloured logo is drawn as a template image is, in the bar's text colour
+// alone (the user: 去掉色彩满足 tray icon 样式): no colour left in it, and
+// Codex's white glyph on its blue tile is cut out of a tile of ink.
+func TestTrayImageMonoLogos(t *testing.T) {
+	bird, err := os.ReadFile("tray.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex-color", "claude-color", "gemini-color", "zcode", "alma"} {
+		icon, _ := trayIconFile(name)
+		for _, dark := range []bool{false, true} {
+			b, _, _ := trayImagePNG([]trayCell{{Icon: icon, Rows: []string{"5%", "7%"}}}, bird, 22, 2, dark, true)
+			img, err := png.Decode(bytes.NewReader(b))
+			if err != nil {
+				t.Fatal(err)
+			}
+			logo := image.Rect(48, 8, 48+28, 36)
+			for y := logo.Min.Y; y < logo.Max.Y; y++ {
+				for x := logo.Min.X; x < logo.Max.X; x++ {
+					r, g, b, _ := img.At(x, y).RGBA()
+					if max(r, g, b)-min(r, g, b) > 0x1800 {
+						t.Fatalf("%s, dark %v: colour at %d,%d: %x %x %x", name, dark, x, y, r>>8, g>>8, b>>8)
+					}
+				}
+			}
+			ink := inkIn(img, logo, dark)
+			if ink < 40 {
+				t.Errorf("%s, dark %v: the logo has %d px of ink", name, dark, ink)
+			}
+			if name == "codex-color" && ink > 28*28*85/100 {
+				t.Errorf("codex, dark %v: %d px of ink, its glyph not cut out", dark, ink)
+			}
+		}
+	}
+}
+
+// Each logo is as large as the next in the menu bar (the user: tray 上的
+// provider icon 大小不一致), whatever margin its file has round it: its ink
+// spans 12-14pt of the 14pt box, a solid tile the lower end.
+func TestTrayImageLogoSizes(t *testing.T) {
+	bird, err := os.ReadFile("tray.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex-color", "claude-color", "gemini-color", "zcode", "alma", "kimi", "openai", "deepseek-color", "qwen-color", "minimax-color"} {
+		icon, mono := trayIconFile(name)
+		b, _, _ := trayImagePNG([]trayCell{{Icon: icon, Mono: mono, Rows: []string{"5%", "7%"}}}, bird, 22, 2, false, false)
+		img, err := png.Decode(bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		x0, y0, x1, y1 := 99, 99, -1, -1
+		for y := 0; y < 44; y++ {
+			for x := 46; x < 78; x++ {
+				if _, _, _, a := img.At(x, y).RGBA(); a > 0x4000 {
+					x0, y0, x1, y1 = min(x0, x), min(y0, y), max(x1, x), max(y1, y)
+				}
+			}
+		}
+		if side := max(x1-x0, y1-y0) + 1; side < 24 || side > 29 {
+			t.Errorf("%s spans %d px of a 28 px box", name, side)
+		}
+	}
+}

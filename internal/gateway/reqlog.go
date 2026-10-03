@@ -56,7 +56,7 @@ func endpointOf(r *http.Request, from, to provider.Protocol) string {
 
 // failedWith fills in what a call that failed said, on a usage record.
 func failedWith(rec *usage.Record, status int, msg, errType string) {
-	if status >= 400 {
+	if status >= 400 || msg != "" {
 		rec.Error, rec.ErrType = keepMsg(msg), errType
 	}
 }

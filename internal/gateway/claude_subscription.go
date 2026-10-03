@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -124,6 +125,10 @@ type subscriptionRun struct {
 	idleKey string
 	idleAt  time.Time
 	convKey string
+
+	// effort is the level its Claude Code thinks at, as it started (its
+	// --effort) or was told since (setEffort); "" is Claude Code's own
+	effort string
 
 	// told is the conversation as the client had it in its last request
 	// here (historyKey): tool results are the run's while the client's
@@ -335,7 +340,7 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, con
 		return nil, nil, err
 	}
 
-	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Schema) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner}
+	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner, effort: req.Effort, schema: len(req.Schema) > 0}
 	// A caller may abandon a turn after receiving tool_use. Do not leave the
 	// parked Claude process and MCP request alive forever.
 	run.timer = time.AfterFunc(30*time.Minute, run.abort)
@@ -405,11 +410,35 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 	run.segment = ch
 	run.mu.Unlock()
 	run.timer.Reset(30 * time.Minute)
+	// a turn the router picked another effort for (#502) goes on in the
+	// same Claude Code, told the level first: it asks the next turn at it
+	// in output_config alone, the conversation it wrote to the cache
+	// untouched, where a run started anew is told it in one message, a
+	// prefix the cache has never seen
+	if req.Effort != run.effort {
+		if err := run.setEffort(req.Effort); err != nil {
+			run.abort()
+			return nil, nil
+		}
+	}
 	if _, err := run.stdin.Write(append(line, '\n')); err != nil {
 		run.abort()
 		return nil, nil
 	}
 	return run, ch
+}
+
+// setEffort tells the run's Claude Code to think at effort from its next
+// turn, as its SDK's applyFlagSettings does: a control request, answered
+// with a control_response its output is read past.
+func (r *subscriptionRun) setEffort(effort string) error {
+	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": "effort-" + randomToken()[:12],
+		"request": map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{"effortLevel": effort}}})
+	if _, err := r.stdin.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	r.effort = effort
+	return nil
 }
 
 // retire lets go of the runs left waiting at an earlier point of this
@@ -544,11 +573,13 @@ func (r *subscriptionRun) park() {
 // to be found again: whom it runs as, the model, its settings and tools,
 // and the messages' words, tool calls and results. Whitespace, thinking and
 // how a reply is split into messages are left out, as clients keep those
-// differently.
+// differently. Its effort is not in it, only whether it asked for one: a
+// run is told another level as its turn starts (setEffort), where one
+// started anew would write the whole conversation to the cache again (#502).
 func turnKey(owner string, req *Request, msgs []Message) string {
 	h := sha256.New()
 	tools, _ := json.Marshal(req.Tools)
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort, req.ToolChoice, req.System, tools, req.WebSearch, req.Schema)
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort != "", req.ToolChoice, req.System, tools, req.WebSearch, req.Schema)
 	hashMessages(h, msgs, nil)
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -811,8 +842,11 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			continue
 		}
 		if envelope.Type == "rate_limit_event" {
-			if _, user, ok := strings.Cut(r.owner, "\x00"); ok {
-				provider.NoteClaudeLimits(user, claudeLimits(envelope.RateLimitInfo))
+			// a run in Claude Code's own home is on whatever account
+			// Claude Code is signed in to by now: switched off the
+			// owner's, what it says is another's (nil_1024)
+			if f := strings.Split(r.owner, "\x00"); len(f) > 1 && !(len(f) > 2 && f[2] == ownHome && provider.ClaudeCodeMovedOff(f[1])) {
+				provider.NoteClaudeLimits(f[1], claudeLimits(envelope.RateLimitInfo))
 			}
 			continue
 		}
@@ -1247,12 +1281,17 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown or expired Claude run", http.StatusNotFound)
 		return
 	}
+	body, status, err := readBoundedRequestBody(w, r, requestLimits{body: 16 << 20}, nil)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
 	var call struct {
 		ToolCallID string          `json:"tool_call_id"`
 		Name       string          `json:"name"`
 		Arguments  json.RawMessage `json:"arguments"`
 	}
-	if json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&call) != nil || call.ToolCallID == "" {
+	if json.Unmarshal(body, &call) != nil || call.ToolCallID == "" {
 		http.Error(w, "invalid tool call", http.StatusBadRequest)
 		return
 	}
@@ -1441,10 +1480,23 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
+// ownHome marks a run's owner as Claude Code's own sign-in, run in its
+// own home.
+const ownHome = "own"
+
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
 	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
 		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
 		owner := p.ID + "\x00" + p.Account.User
+		if p.Account.AgentsOwn() {
+			// Claude Code's own sign-in, which a switch moves to another
+			// account: a run kept from before goes on as that one (it
+			// reads its keychain again), so the account, once saved and
+			// run in a config directory of its own, never resumes it
+			// (nil_1024: made first, a saved account's turns went on as
+			// the spent one in its Claude Code)
+			owner += "\x00" + ownHome
+		}
 		if run, events := s.subscription.resume(req, owner); run != nil {
 			return run, events, nil
 		}
@@ -1490,6 +1542,7 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	// so the client compacts again at each tool call. It is let go, and a
 	// run started anew is told the conversation as the client now has it.
 	if run != nil && !run.follows(req.Messages) {
+		log.Printf("%s run on %s let go: earlier messages changed while it waited for tool results", name, model)
 		run.abort()
 		run = nil
 	}

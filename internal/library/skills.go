@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/source"
 	"gopkg.in/yaml.v3"
 )
 
@@ -205,6 +206,24 @@ func realDir(p string) string {
 	return p
 }
 
+// realBelow is realDir for a path that may not be there yet: the nearest
+// folder above it that is, links followed, and the rest as it is.
+func realBelow(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if _, err := os.Lstat(p); err == nil {
+			return filepath.Join(realDir(p), rest)
+		}
+		up := filepath.Dir(p)
+		if up == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = up
+	}
+}
+
 // resolve follows every link on the way to p, a part at a time; not ok
 // when a part of it isn't there or the links go round.
 func resolve(p string, depth int) (string, bool) {
@@ -271,6 +290,21 @@ func linked(p string) bool {
 // Goose, Cindy): one link there, whichever of them it's for.
 func sharedSkillsDir() string { return filepath.Join(home(), ".agents", "skills") }
 
+// sharedHas is whether the library's skill by that name is kept in
+// ~/.agents/skills: the user's own entry there (not a link magpie made)
+// is the very folder the library's is or links to, so every agent that
+// reads the shared folder has it, whatever the library gives.
+func sharedHas(name string) bool {
+	p, lib := filepath.Join(sharedSkillsDir(), name), skillDir(name)
+	if _, err := os.Lstat(p); err != nil || ours(p, name) {
+		return false
+	}
+	if _, err := os.Stat(lib); err != nil {
+		return false
+	}
+	return realDir(p) == realDir(lib)
+}
+
 // within is whether p is dir or inside it.
 func within(p, dir string) bool {
 	rel, err := filepath.Rel(dir, p)
@@ -305,6 +339,11 @@ func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
 		if s == nil || !slices.Contains(readsShared, id) || realDir(t.Skills) == shared {
 			return false
 		}
+		// the library's skill is kept in the shared folder itself (brought
+		// in from there): every agent reading it has it, ticked or not (#595)
+		if sharedHas(s.Name) {
+			return true
+		}
 		p := filepath.Join(sharedSkillsDir(), s.Name)
 		return slices.ContainsFunc(all, func(o *Target) bool {
 			return o.Skills != "" && realDir(o.Skills) == shared && slices.Contains(s.Agents, o.Agent.ID)
@@ -325,10 +364,22 @@ func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
 		res.changed(id)
 	}
 	for _, s := range l.Skills {
-		if !slices.Contains(s.Agents, id) || inShared(s) {
+		if !slices.Contains(s.Agents, id) {
 			continue
 		}
 		p := filepath.Join(t.Skills, s.Name)
+		if inShared(s) {
+			// a copy of its own of the very same files would be the skill
+			// twice as much as a link: kept aside, as it would be for one
+			if _, err := os.Lstat(p); err == nil && !ours(p, s.Name) && realDir(p) != realDir(skillDir(s.Name)) && sameTree(p, skillDir(s.Name)) {
+				if _, err := setAside(id, p); err != nil {
+					res.fail(id, "skill:"+s.Name, err)
+				} else {
+					res.changed(id)
+				}
+			}
+			continue
+		}
 		// the folder the library's skill links to is there already: one
 		// brought in from ~/.agents/skills, which stays where it is
 		if ours(p, s.Name) || realDir(p) == realDir(skillDir(s.Name)) {
@@ -459,7 +510,7 @@ func fetch(src Source) (string, error) {
 	req, _ := http.NewRequest("GET", tarballURL(src.Repo, src.Ref), nil)
 	req.Header.Set("User-Agent", "magpie")
 	c := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := c.Do(req)
+	resp, err := source.DoOfficial(c, req)
 	if err != nil {
 		return "", fmt.Errorf("couldn't reach GitHub: %w", err)
 	}
@@ -666,10 +717,25 @@ func InstallSkills(input string, paths, agents []string) (*Result, error) {
 			if err := os.MkdirAll(skillsDir(), 0o755); err != nil {
 				return err
 			}
+			// a folder already in the library's own (#595): linked to itself
+			// it fails, and copied onto itself every file of it was emptied
+			if src.Kind == "folder" && realDir(from) == realDir(skillDir(c.Name)) {
+				return fmt.Errorf("%s is in the library's folder already: bring it in from the skills found there", c.Name)
+			}
+			// something by that name in the library's folder that the
+			// library doesn't list is never written into: that would mix
+			// two skills' files, and a failed copy would take it away
+			if _, err := os.Lstat(skillDir(c.Name)); err == nil {
+				return fmt.Errorf("the library's folder already has a %s in it (%s)", c.Name, skillDir(c.Name))
+			}
 			if src.Kind == "folder" {
 				src.Dir = from
 				if err := os.Symlink(from, skillDir(c.Name)); err != nil {
+					if errors.Is(err, fs.ErrExist) {
+						return fmt.Errorf("the library already has a skill called %s", c.Name)
+					}
 					if err := copyDir(from, skillDir(c.Name)); err != nil {
+						os.RemoveAll(skillDir(c.Name))
 						return err
 					}
 				}
@@ -1008,7 +1074,7 @@ func removeSkill(l *Library, name, stamp string) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// its folder is gone already: only the entry goes
-	case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+	case err == nil && (fi.Mode()&fs.ModeSymlink != 0 || linked(p)): // a junction too, as the page says
 		if err := os.Remove(p); err != nil { // a folder of the user's: only the link goes
 			return err
 		}
@@ -1106,25 +1172,33 @@ type FoundSkill struct {
 	// very same files (CC Switch copies a skill into each agent): brought
 	// in, they get the library's in its place
 	Copies []string `json:"copies,omitempty"`
-	Link        string   `json:"link,omitempty"`   // where it really is, when it's a link
+	Link   string   `json:"link,omitempty"` // where it really is, when it's a link
 	// Shared is its entry in the user-wide ~/.agents/skills, when it is
 	// there; the agents that have it are those whose entry is a link (or a
 	// junction) to the very same folder
 	Shared string `json:"shared,omitempty"`
-	real   string
-	at     string // the entry in the first agent's folder
+	// Library is its folder in the library's own skills folder, put there
+	// by hand (or left by a library.json that lost it): brought in, it is
+	// listed where it is (#595)
+	Library string `json:"library,omitempty"`
+	real    string
+	at      string // the entry in the first agent's folder
 }
 
 func foundSkills(l *Library) []FoundSkill {
 	var out []*FoundSkill
 	byName := map[string]*FoundSkill{}
-	// the shared folder first, so a skill there is the row the agents'
-	// links to it join
-	type place struct{ dir, agent string }
-	places := []place{{dir: sharedSkillsDir()}}
+	// the library's own folder first, for what it holds that the library
+	// doesn't list, then the shared folder, so a skill there is the row the
+	// agents' links to it join
+	type place struct {
+		dir, agent string
+		lib        bool
+	}
+	places := []place{{dir: skillsDir(), lib: true}, {dir: sharedSkillsDir()}}
 	for _, t := range Targets() {
 		if t.Skills != "" {
-			places = append(places, place{t.Skills, t.Agent.ID})
+			places = append(places, place{dir: t.Skills, agent: t.Agent.ID})
 		}
 	}
 	for _, pl := range places {
@@ -1132,7 +1206,10 @@ func foundSkills(l *Library) []FoundSkill {
 		for _, e := range es {
 			name := e.Name()
 			p := filepath.Join(pl.dir, name)
-			if strings.HasPrefix(name, ".") || ours(p, name) || l.skill(name) != nil || !nameRe.MatchString(name) {
+			f := byName[name]
+			// magpie's link to the library's folder is an agent having the
+			// one found there
+			if strings.HasPrefix(name, ".") || ours(p, name) && (f == nil || f.Library == "") || l.skill(name) != nil || !nameRe.MatchString(name) {
 				continue
 			}
 			m, ok := readMeta(p)
@@ -1140,13 +1217,15 @@ func foundSkills(l *Library) []FoundSkill {
 				continue
 			}
 			r := realDir(p)
-			f := byName[name]
 			switch {
 			case f == nil:
 				f = &FoundSkill{Name: name, Description: m.Description, Agents: []string{}, real: r, at: p}
-				if pl.agent == "" {
+				switch {
+				case pl.lib:
+					f.Library = p
+				case pl.agent == "":
 					f.Shared = p
-				} else {
+				default:
 					f.Agents = append(f.Agents, pl.agent)
 				}
 				if linked(p) {
@@ -1155,9 +1234,14 @@ func foundSkills(l *Library) []FoundSkill {
 				byName[name] = f
 				out = append(out, f)
 			case f.real == r:
-				if pl.agent != "" && !slices.Contains(f.Agents, pl.agent) {
+				if pl.agent == "" {
+					f.Shared = p
+				} else if !slices.Contains(f.Agents, pl.agent) {
 					f.Agents = append(f.Agents, pl.agent)
 				}
+			case pl.agent == "":
+				// another by that name in the shared folder than the one in
+				// the library's: no agent's, and left as it is
 			case sameTree(p, f.at):
 				f.Copies = append(f.Copies, pl.agent)
 			default:
@@ -1222,11 +1306,18 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	// one in the shared ~/.agents/skills (or a link into it) stays
 	// there, linked to: the shared folder is the user's, never emptied
 	shared := f.Shared != "" || within(f.real, realDir(sharedSkillsDir()))
-	if f.Link != "" || shared {
+	switch {
+	case f.Library != "":
+		// in the library's folder already (#595): listed where it is, a
+		// folder of its own or a link to one elsewhere
+		if !linked(f.Library) {
+			src = nil
+		}
+	case f.Link != "" || shared:
 		if err := os.Symlink(f.real, skillDir(name)); err != nil {
 			return err
 		}
-	} else {
+	default:
 		// a move that copied it all but couldn't take the whole folder away
 		// (a file in it held open) has brought it in all the same: what is
 		// left is set aside below, not left to stand in the library's way
@@ -1241,7 +1332,7 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 			p := filepath.Join(t.Skills, name)
 			if linked(p) {
 				os.Remove(p)
-			} else if _, err := os.Lstat(p); err == nil && src == nil {
+			} else if _, err := os.Lstat(p); err == nil && src == nil && realDir(p) != realDir(skillDir(name)) {
 				setAside(id, p)
 			}
 		}
@@ -1257,6 +1348,11 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 // ---- files ----------------------------------------------------------------
 
 func copyDir(from, to string) error {
+	// onto the folder itself, or into it, a copy would empty each file as it
+	// went (O_TRUNC) or never end (#595)
+	if src, dst := realDir(from), realBelow(to); src == dst || within(dst, src) {
+		return fmt.Errorf("can't copy %s into itself", from)
+	}
 	return filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err

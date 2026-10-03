@@ -28,6 +28,7 @@
 <link rel="apple-touch-icon" href="/img/icon-256.png">
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/start">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/start">
+<link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/start">
 <link rel="stylesheet" href="/docs.css">
 <meta property="og:title" content="Get started with magpie">
 <meta property="og:description" content="Add the providers you have, pick a model for each agent. The setup, step by step.">
@@ -43,10 +44,18 @@
     <a href="/">Home</a>
     <a href="/docs/start">Get started</a>
     <a href="/docs/intent">Intent routing</a>
+    <a href="/docs/plugins">Plugins</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
-  <a class="icon-btn lang" href="/docs/zh/start" hreflang="zh" lang="zh" title="中文版">中文</a>
+  <div class="langs">
+    <button class="icon-btn lang" type="button" aria-label="Language" title="Language" aria-haspopup="true" aria-expanded="false" aria-controls="langs"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M1.75 8h12.5M8 1.75c1.7 1.75 2.55 3.83 2.55 6.25S9.7 12.5 8 14.25M8 1.75C6.3 3.5 5.45 5.58 5.45 8S6.3 12.5 8 14.25"/></svg></button>
+    <div class="lang-menu" id="langs" hidden>
+      <a href="/docs/start" hreflang="en" lang="en">English</a>
+      <a href="/docs/zh/start" hreflang="zh" lang="zh">中文</a>
+      <a href="/docs/ja/start" hreflang="ja" lang="ja">日本語</a>
+    </div>
+  </div>
   <a class="icon-btn" href="https://discord.gg/vGSnD3ZKQF" aria-label="magpie on Discord" title="Join us on Discord"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a>
   <a class="icon-btn" href="https://github.com/yetone/magpie" aria-label="magpie on GitHub" title="Source on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></a>
   <button class="icon-btn theme" type="button" aria-label="Theme" title="Theme: system"><svg class="i-system" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.25V14"/></svg><svg class="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1 1M12 12l1 1M3 13l1-1M12 4l1-1"/></svg><svg class="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/></svg></button>
@@ -148,17 +157,18 @@
     </figure>
 
     <h3>Several accounts or keys in one provider</h3>
-    <p>Open the provider’s row and tick every account or key to use. <span class="ui">Routing</span> says how requests spread over them: <span class="ui">Smart</span> (the default), <span class="ui">In order</span>, <span class="ui">In turn</span> or <span class="ui">Least used first</span>. <span class="ui">Fallback</span> lists models to use instead when the provider is out of quota, rate limited or down.</p>
+    <p>Open the provider’s row and tick every account or key to use. <span class="ui">Routing</span> says how requests spread over them: <span class="ui">Smart</span> (the default), <span class="ui">In order</span>, <span class="ui">In turn</span>, <span class="ui">Least used first</span> or <span class="ui">Weekly pace</span>. <span class="ui">Fallback</span> lists models to use instead when the provider is out of quota, rate limited or down.</p>
 
     <h3>One model over several providers</h3>
     <p>A group is several models, from one provider or many, that an agent picks as one: <code>group/&lt;id&gt;</code>, under <em>Routing groups</em> in the picker. A model two of your providers serve under the same name becomes a group on its own; <span class="ui">New group</span> in the <span class="ui">Routing</span> tab makes one of any models you like. The first model answers for what the group can do.</p>
     <div class="callout"><b>Groups you get without doing anything.</b> Add a second provider that serves a model you already have — Claude Opus from your Claude subscription and from Copilot, DeepSeek from its own API and from OpenRouter — and magpie makes it a group by itself, <code>group/auto-&lt;model&gt;</code>, over every provider that serves it. The name is matched however each vendor spells it (<code>deepseek/deepseek-chat</code>, <code>deepseek-chat</code>). Pick it for an agent to spread its requests over all of them; <code>magpie group rm</code> hides one you don’t want.</div>
     <div class="table-wrap"><table>
       <tr><th>Routing</th><th>What goes first</th></tr>
-      <tr><td>Smart <code>smart</code></td><td>The default. Over every member’s accounts and keys together: of the subscriptions with quota to spare, the one whose allowance renews soonest; one resting after a failure goes last.</td></tr>
+      <tr><td>Smart <code>smart</code></td><td>The default. Over the members’ accounts and keys together (a group in the group as one, see below): of the subscriptions with quota to spare, the one whose allowance renews soonest. The week decides; an account with five hours and no week (Claude Enterprise) goes by its five hours, so ahead of every week renewing later. One resting after a failure goes last.</td></tr>
       <tr><td>In order <code>order</code></td><td>The first model until it can’t answer, then the next.</td></tr>
       <tr><td>In turn <code>rotate</code></td><td>Each conversation’s next turn goes to the next member’s account or key, spreading the load.</td></tr>
       <tr><td>Least used <code>usage</code></td><td>The account or key with the most of its allowance left.</td></tr>
+      <tr><td>Weekly pace <code>pace</code></td><td>The account with the most of its week left per hour until it renews — the one with the most to lose at its reset — so less of each member’s week is lost at its reset; an account with five hours and no week (Claude Enterprise) by what its five hours have left per hour until they renew, so almost always first. One at 90% or more waits until the others can’t answer. A key by the tokens sent it lately.</td></tr>
     </table></div>
     <div class="table-wrap"><table>
       <tr><th>Stays</th><th>How long a conversation stays with the account or key that answered it</th></tr>
@@ -181,6 +191,7 @@
     <p>A group’s models can include another group: pick it under <em>Routing groups</em> in <span class="ui">Add a model</span>, or <code>models+=group/&lt;id&gt;</code> from a terminal. The group in it takes its place in the order and routes among its own models by its own routing and rules. So Coder can be <code>deepseek-v4-pro</code> then <em>Fast</em>, and Fast its own order of cheap models. A Coder rule can send a turn to <code>group/fast</code>, and Fast’s own rules then pick which of its models goes first.</p>
     <ul>
       <li><b>No loops.</b> A group can’t be in itself, directly or through the groups in it. Saving Fast with Coder in it, while Coder has Fast, is refused, and the picker doesn’t offer such a group. Groups go at most 8 deep. A group can’t be removed while another has it: take it out there first.</li>
+      <li><b>Each group routes by its own routing.</b> Whatever the outer group’s routing, it never reaches inside a group in it: Smart, In turn, Least used or Weekly pace weighs the inner group as one member, by the account or key the inner group would try first, and where it lands the inner group is tried whole, in its own order. Coder on Smart with Claude (In order) and GPT (In order) in it compares Claude’s first with GPT’s first, not all of their accounts together.</li>
       <li><b>Failover goes through.</b> If every model in the inner group fails, the outer group’s next member answers, as with any member.</li>
       <li>A model that appears twice (on its own and in a group in it) is asked once, at its first place.</li>
     </ul>
@@ -254,6 +265,7 @@ magpie claude group/opus-anywhere    <span class="c"># use it</span></pre>
   <div class="links">
     <a href="/">Home</a>
     <a href="/docs/intent">Intent routing</a>
+    <a href="/docs/plugins">Plugins</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
@@ -276,18 +288,8 @@ magpie claude group/opus-anywhere    <span class="c"># use it</span></pre>
       b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1400);
     } catch {}
   }));
-
-  // The table of contents follows the reading position.
-  const links = [...document.querySelectorAll(".toc a")];
-  const heads = links.map((a) => document.getElementById(a.hash.slice(1)));
-  const spy = () => {
-    let i = 0;
-    heads.forEach((h, j) => { if (h.getBoundingClientRect().top < 140) i = j; });
-    if (innerHeight + scrollY >= document.body.scrollHeight - 4) i = heads.length - 1;
-    links.forEach((a, j) => a.classList.toggle("on", j === i));
-  };
-  addEventListener("scroll", spy, { passive: true }); spy();
 })();
 </script>
+<script src="/docs.js"></script>
 </body>
 </html>

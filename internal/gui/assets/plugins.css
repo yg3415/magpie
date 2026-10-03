@@ -70,6 +70,10 @@
 .pm-chip.moved { gap: 4px; background: var(--accent-soft); color: var(--accent); }
 .pm-chip.moved .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .pm-row .sub.ask { color: var(--fg); }
+.pm-chip.warn { gap: 4px; background: var(--amber-soft); color: var(--amber); }
+.pm-chip.warn .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pm-foot .pm-check { display: inline-flex; align-items: center; gap: 5px; }
+.pm-foot .pm-check .spin { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; }
 .pm-chip.soft { background: none; box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); }
 
 /* a plugin's one button */
@@ -88,7 +92,6 @@
 .pm-act.done:hover:not(:disabled) { background: var(--green-soft); color: var(--green); }
 .pm-act.busy { color: var(--muted); font-weight: 500; }
 .pm-act:disabled:not(.busy):not(.done) { opacity: .55; }
-.pm-card > .pm-act.move { height: auto; min-height: 26px; padding: 4px 12px; white-space: normal; text-align: center; }
 .pm-act .spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; }
 
 /* loading: cards drawn as grey bars */

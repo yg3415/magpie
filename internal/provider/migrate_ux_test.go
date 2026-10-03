@@ -222,3 +222,38 @@ func TestMovedShowsBuiltinHost(t *testing.T) {
 		t.Fatalf("moved devin: %q", h)
 	}
 }
+
+// A built-in with no account signed in goes onto its plugin as it is: the
+// plugin installed and the subscription its from then on, so the first
+// sign-in is the plugin's. Going back takes the plugin it installed away.
+// One with an account is moved.
+func TestAdoptBeforeSigningIn(t *testing.T) {
+	inUse := []string{"fake-1"}
+	ctx, abs, installs := fakePlugin(t, &inUse)
+	if err := Adopt(ctx, "fakeco"); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := MigrationOf("fakeco"); m.State != MovePlugin || !m.Installed || !pluginListed(abs) || *installs != 1 {
+		t.Fatalf("adopted: %+v, listed %v, %d installs", m, pluginListed(abs), *installs)
+	}
+	if PluginID("fakeco") != "fakeco" {
+		t.Fatalf("the plugin's provider is %s", PluginID("fakeco"))
+	}
+	if err := Adopt(ctx, "fakeco"); err != nil || *installs != 1 {
+		t.Fatalf("adopting again: %v, %d installs", err, *installs)
+	}
+	if err := MoveBack(ctx, "fakeco"); err != nil {
+		t.Fatal(err)
+	}
+	if Moved("fakeco") || pluginListed(abs) {
+		t.Fatalf("back: moved %v, listed %v", Moved("fakeco"), pluginListed(abs))
+	}
+
+	setFakeLogins(t, fakeLogin("a@fake", "r-a", true, true))
+	if err := Adopt(ctx, "fakeco"); err != nil {
+		t.Fatal(err)
+	}
+	if !Moved("fakeco") || !plugin.SignedIn("fakeco") || len(fakeSaved(t)) != 0 {
+		t.Fatalf("adopting one signed in didn't move it: moved %v, saved %+v", Moved("fakeco"), fakeSaved(t))
+	}
+}

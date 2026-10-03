@@ -40,7 +40,7 @@ func TestWhatsNewAfterUpgrade(t *testing.T) {
 		Version = v
 		n := &whatsNew{}
 		n.start()
-		return n, n.get(context.Background(), false)
+		return n, n.get(context.Background(), false, "en")
 	}
 
 	// a fresh install: nothing shown, the version kept
@@ -64,10 +64,10 @@ func TestWhatsNewAfterUpgrade(t *testing.T) {
 	}
 	// shown once; Settings still opens them
 	n.seen()
-	if j := n.get(context.Background(), false); j.Show || len(j.Releases) != 0 {
+	if j := n.get(context.Background(), false, "en"); j.Show || len(j.Releases) != 0 {
 		t.Fatalf("after seen: %+v", j)
 	}
-	if j := n.get(context.Background(), true); j.Show || len(j.Releases) != 2 {
+	if j := n.get(context.Background(), true, "en"); j.Show || len(j.Releases) != 2 {
 		t.Fatalf("asked again: %+v", j)
 	}
 	// a downgrade: nothing
@@ -114,7 +114,130 @@ func TestWhatsNewFromBefore(t *testing.T) {
 	Version = "0.1.604"
 	n := &whatsNew{}
 	n.start()
-	if j := n.get(context.Background(), false); !j.Show || len(j.Releases) != 1 || j.Releases[0].Notes != "## Bug Fixes\n\n- four" {
+	if j := n.get(context.Background(), false, "en"); !j.Show || len(j.Releases) != 1 || j.Releases[0].Notes != "## Bug Fixes\n\n- four" {
 		t.Fatalf("%+v", j)
+	}
+}
+
+// #525: the dialog comes up by itself on the first start of an update the
+// user didn't ask for from magpie; after "Restart to update" its notes wait
+// in Settings, and "Don't show again today" keeps it quiet for the day.
+func TestWhatsNewQuietAfterRestartToUpdate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	dir := filepath.Join(home, "magpie")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"releases": []update.Note{
+			{Version: "0.1.606", Notes: "- six"},
+			{Version: "0.1.605", Notes: "- five"},
+			{Version: "0.1.604", Notes: "- four"},
+		}})
+	}))
+	defer srv.Close()
+	t.Setenv("MAGPIE_NOTES_FEED", srv.URL)
+	t.Setenv("MAGPIE_UPDATE_FEED", "http://127.0.0.1:1/")
+	oldV, oldToday := Version, today
+	defer func() { Version, today = oldV, oldToday }()
+	day := "2026-10-02"
+	today = func() string { return day }
+	run := func(v string) (*whatsNew, whatsNewJSON) {
+		Version = v
+		n := &whatsNew{}
+		n.start()
+		return n, n.get(context.Background(), false, "en")
+	}
+	run("0.1.604")
+
+	// "Restart to update" into 0.1.605: the restart notes it...
+	updates.mu.Lock()
+	oExe, oSelf, oLatest, oStaged := updates.exe, updates.self, updates.latest, updates.staged
+	updates.mu.Unlock()
+	defer func() {
+		updates.mu.Lock()
+		updates.exe, updates.self, updates.latest, updates.staged = oExe, oSelf, oLatest, oStaged
+		updates.mu.Unlock()
+	}()
+	exe := filepath.Join(t.TempDir(), "magpie")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	self, _ := os.Stat(exe)
+	os.WriteFile(exe, []byte("newer"), 0o755) // in already: install has nothing to swap
+	updates.mu.Lock()
+	updates.exe, updates.self, updates.latest = exe, self, &update.Release{Version: "0.1.605"}
+	updates.mu.Unlock()
+	if !restartToUpdate(true, false, "") {
+		t.Fatal("restart to update failed")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, updatedInAppFile)); strings.TrimSpace(string(b)) != "0.1.605" {
+		t.Fatalf("noted %q", b)
+	}
+	// ...and its first start shows nothing by itself, but Settings has them
+	n, j := run("0.1.605")
+	if j.Show || len(j.Releases) != 0 {
+		t.Fatalf("after restart to update: %+v", j)
+	}
+	if j := n.get(context.Background(), true, "en"); j.Show || len(j.Releases) != 1 || j.Releases[0].Version != "0.1.605" {
+		t.Fatalf("Settings after restart to update: %+v", j)
+	}
+	if _, err := os.Stat(filepath.Join(dir, updatedInAppFile)); !os.IsNotExist(err) {
+		t.Fatalf("the note is kept: %v", err)
+	}
+
+	// an update installed some other way (on quitting, by hand): shown
+	_, j = run("0.1.606")
+	if !j.Show || len(j.Releases) != 1 {
+		t.Fatalf("after an update from outside: %+v", j)
+	}
+
+	// a note for another version is no reason to keep quiet
+	run("0.1.604")
+	updatedInApp("0.1.605")
+	if _, j := run("0.1.606"); !j.Show {
+		t.Fatalf("another version's note: %+v", j)
+	}
+
+	// "Don't show again today": nothing by itself today, Settings still has them
+	run("0.1.604")
+	if err := setQuietToday(true); err != nil {
+		t.Fatal(err)
+	}
+	n, j = run("0.1.606")
+	if j.Show || len(j.Releases) != 0 {
+		t.Fatalf("quiet today: %+v", j)
+	}
+	if j := n.get(context.Background(), true, "en"); len(j.Releases) != 2 {
+		t.Fatalf("Settings on a quiet day: %+v", j)
+	}
+	// the next day it shows again
+	day = "2026-10-03"
+	if j := n.get(context.Background(), false, "en"); !j.Show {
+		t.Fatalf("next day: %+v", j)
+	}
+	// unticked
+	day = "2026-10-02"
+	setQuietToday(false)
+	if j := n.get(context.Background(), false, "en"); !j.Show {
+		t.Fatalf("unticked: %+v", j)
+	}
+}
+
+// The dialog's checkbox posts to whatsnew/today.
+func TestWhatsNewTodayRoute(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	mux := http.NewServeMux()
+	whatsNewRoutes(mux)
+	post := func(body string) int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/whatsnew/today", strings.NewReader(body)))
+		return rec.Code
+	}
+	if c := post(`{"on":true}`); c != http.StatusNoContent || !quietToday() {
+		t.Fatalf("on: %d %v", c, quietToday())
+	}
+	if c := post(`{"on":false}`); c != http.StatusNoContent || quietToday() {
+		t.Fatalf("off: %d %v", c, quietToday())
+	}
+	if c := post(`nope`); c != http.StatusBadRequest {
+		t.Fatalf("bad body: %d", c)
 	}
 }

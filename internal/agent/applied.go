@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -268,6 +269,51 @@ func (a *Agent) Keep() {
 	}
 	delete(m, a.ID)
 	appliedSave(m)
+}
+
+// Wired reports whether magpie is in the agent's config: a field on one of
+// magpie's models, or on magpie itself (an app whose one setting is magpie
+// as its provider).
+func (a *Agent) Wired() bool {
+	vals := a.Values()
+	for _, f := range a.Fields {
+		if v := vals[f.Key]; v == magpieID || magpieValue(a, f, v, vals) {
+			return true
+		}
+	}
+	return false
+}
+
+// Disconnect takes magpie out of the agent's config and puts back what the
+// user had, the Agents page's "Disconnect from magpie" (Fate on Discord:
+// picking the agent's default did it, but nothing said so). Unwire first,
+// for an agent whose default would leave it as installed; then each field
+// still on magpie goes to its default, as picking it does, and so does
+// each one magpie set that reads as magpie set it (an effort). What magpie
+// remembered setting is forgotten.
+func (a *Agent) Disconnect() error {
+	if !a.Wired() {
+		return nil
+	}
+	before, rec := a.Values(), appliedOf(a.ID)
+	if a.Unwire != nil {
+		if err := a.Unwire(); err != nil {
+			return err
+		}
+	}
+	for _, f := range a.Fields {
+		vals := a.Values()
+		v := vals[f.Key]
+		set := v != "" && rec.Fields[f.Key] == v && before[f.Key] == v
+		if v == "" || !set && v != magpieID && !magpieValue(a, f, v, vals) {
+			continue
+		}
+		if err := f.Set(""); err != nil {
+			return fmt.Errorf("%s: %w", f.Label, err)
+		}
+	}
+	a.Keep()
+	return nil
 }
 
 // lastJSONLTime reads the newest Unix timestamp (seconds or milliseconds)

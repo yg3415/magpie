@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,5 +74,64 @@ func TestGroupsInGroups(t *testing.T) {
 	postAs(t, s, "three", `{"model":"group/top","messages":[{"role":"user","content":"hey"}]}`)
 	if o := order(); !strings.Contains(o, "a[]") || !strings.Contains(o, "b[fast]") || !strings.Contains(o, "c[fast]") {
 		t.Fatal(o)
+	}
+}
+
+// A group in a group is routed by its own routing whatever the group's
+// (#576): the group's routing picks among its groups, as one each, never
+// within them. Outer rotating over One and Two, each in order, turns from
+// One to Two, each tried in its own order — not over all four models,
+// which would turn to b, One's second, and put a before c.
+func TestGroupInGroupKeepsItsOwnRouting(t *testing.T) {
+	fresh(t)
+	for _, id := range []string{"a", "b", "c", "d"} {
+		serveOn(t, id, "k"+id, []string{"m"}, &keyed{})
+	}
+	if err := provider.SaveGroup(provider.Group{Name: "One", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{Name: "Two", Members: []string{"c/m", "d/m"}, Routing: provider.Ordered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{Name: "Outer", Members: []string{"group/one", "group/two"}, Routing: provider.Rotate}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	order := func() string {
+		r := s.trace.routes[len(s.trace.routes)-1]
+		var out []string
+		for _, w := range r.Order {
+			out = append(out, w.Provider+"["+strings.Join(w.Via, ",")+"]")
+		}
+		return strings.Join(out, " ")
+	}
+	want := []string{
+		"a[one] b[one] c[two] d[two]",
+		"c[two] d[two] a[one] b[one]",
+		"a[one] b[one] c[two] d[two]",
+	}
+	for i, w := range want {
+		code, body := postAs(t, s, "turn"+string(rune('a'+i)), `{"model":"group/outer","messages":[{"role":"user","content":"hi"}]}`)
+		if code != 200 {
+			t.Fatalf("%d %s", code, body)
+		}
+		if o := order(); o != w {
+			t.Fatalf("request %d: %s, want %s", i+1, o, w)
+		}
+	}
+
+	// a model of Outer's own is weighed beside its groups, one key each
+	top, _, _ := provider.FindGroup("group/outer")
+	top.Members = []string{"group/one", "c/m"}
+	if err := provider.SaveGroup(top); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for i := range 2 {
+		postAs(t, s, "own"+string(rune('a'+i)), `{"model":"group/outer","messages":[{"role":"user","content":"hi"}]}`)
+		got = append(got, order())
+	}
+	if !slices.Contains(got, "a[one] b[one] c[]") || !slices.Contains(got, "c[] a[one] b[one]") {
+		t.Fatalf("own model beside a group: %q", got)
 	}
 }

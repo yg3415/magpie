@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -41,5 +42,44 @@ func TestZenFreeProbe(t *testing.T) {
 		if _, ok := tools[0].(map[string]any)[key]; !ok {
 			t.Fatalf("%v: tool %v", proto, tools[0])
 		}
+	}
+}
+
+// #572: an OpenCode Zen provider added with no key asks with the one
+// OpenCode sends signed out, which Zen's free models answer; a key of the
+// user's own is kept.
+func TestOpenCodeZenNeedsNoKey(t *testing.T) {
+	isolate(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	p, err := FromPreset("opencode-zen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Models = []string{"mimo-v2.6-flash-free"}
+	id, err := Add(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Find(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Key != OpenCodeAnonymousKey {
+		t.Fatalf("key %q", got.Key)
+	}
+	p.Name, p.Key = "Zen paid", "sk-own"
+	if id, err = Add(p); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = Find(id); got.Key != "sk-own" {
+		t.Fatalf("own key %q", got.Key)
+	}
+	// another provider still needs one
+	if _, err := Add(Provider{Name: "Relay", Chat: "https://api.relay.example/v1", Models: []string{"m"}}); err == nil {
+		t.Fatal("a relay with no key")
 	}
 }

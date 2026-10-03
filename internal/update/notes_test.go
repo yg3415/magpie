@@ -93,7 +93,7 @@ func TestNotesBetween(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("MAGPIE_NOTES_FEED", srv.URL)
-	got, err := NotesBetween(context.Background(), "0.1.600", "0.1.604")
+	got, err := NotesBetween(context.Background(), "0.1.600", "0.1.604", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestNotesBetween(t *testing.T) {
 		t.Errorf("%+v", got)
 	}
 	srv.Close()
-	if _, err := NotesBetween(context.Background(), "0.1.600", "0.1.604"); err == nil {
+	if _, err := NotesBetween(context.Background(), "0.1.600", "0.1.604", ""); err == nil {
 		t.Error("no error offline")
 	}
 }

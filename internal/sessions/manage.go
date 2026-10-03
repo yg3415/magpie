@@ -22,7 +22,7 @@ import (
 //
 // Only the agents whose sessions are files of their own can be deleted:
 // Claude Code's (and Qoder's and WorkBuddy's, kept the same way), Codex's,
-// Pi's and omp's. The agents' indexes are left as they are: Codex's
+// Pi's, omp's and Cursor CLI's (a chat's folder, its store and meta.json). The agents' indexes are left as they are: Codex's
 // session_index.jsonl (names by thread id) and its state database, and
 // Claude Code's history.jsonl (the prompts typed, for the up arrow), are
 // written by the agent while it runs, and a name or a prompt left for a
@@ -50,7 +50,7 @@ type AgentCount struct {
 // those kept as files of their own, in a layout magpie knows whole.
 func Deletable(agent string) bool {
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "workbuddy", "codex", "pi", "omp":
+	case "claude", "qoder", "qoder-cn", "workbuddy", "codex", "pi", "omp", "cursor":
 		return true
 	}
 	return false
@@ -65,6 +65,8 @@ var ErrActive = errors.New("the session was written to in the last minute; it ma
 
 // Agents are the agents with sessions on this computer, by how many.
 func Agents() []AgentCount {
+	dbReadMu.Lock()
+	defer dbReadMu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
 	defer closeDBs()
@@ -111,10 +113,10 @@ func ListAgent(agent string) []Managed {
 	out := []Managed{}
 	for _, fs := range groups {
 		s, _ := assemble(fs, price)
-		if s.Resume == "" {
+		if s.Resume == "" && !s.ReadOnly {
 			s.Resume = ResumeCommand(s.Agent, s.ID, s.Cwd)
 		}
-		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent)}
+		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent) && !s.ReadOnly}
 		for _, f := range fs {
 			m.Size += f.size
 			if st := cache[f.path]; st != nil && f.main {
@@ -251,6 +253,21 @@ func sessionPaths(agent, id string, fs []file) []string {
 			out = append(out, p)
 		}
 	}
+	if agent == "cursor" {
+		// a chat is its folder, its subagents' chats theirs, and the
+		// transcripts Cursor wrote of it
+		cwd := ""
+		for _, f := range fs {
+			add(filepath.Dir(f.path))
+			if st := cache[f.path]; st != nil && f.main {
+				cwd = st.Cwd
+			}
+		}
+		for _, p := range cursorTranscripts(cwd, id) {
+			add(p)
+		}
+		return out
+	}
 	for _, f := range fs {
 		if f.main {
 			add(f.path)
@@ -368,6 +385,13 @@ func copyAll(from, to string) error {
 		}
 		if d.IsDir() {
 			return os.MkdirAll(dst, fi.Mode().Perm()|0o700)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(target, dst)
 		}
 		if !fi.Mode().IsRegular() {
 			return nil

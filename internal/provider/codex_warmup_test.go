@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 const (
@@ -278,5 +280,40 @@ func TestCodexWarmRequest(t *testing.T) {
 	}
 	if CodexWarmed()["me@example.com"].IsZero() {
 		t.Fatalf("not kept: %v", CodexWarmed())
+	}
+}
+
+// #604: the warm-up asks the cheapest model, by price where it is known,
+// else a mini, else a luna, else the first listed.
+func TestWarmPick(t *testing.T) {
+	ids := func(ids ...string) []catalog.Model {
+		ms := make([]catalog.Model, len(ids))
+		for i, id := range ids {
+			ms[i] = catalog.Model{ID: id}
+		}
+		return ms
+	}
+	prices := map[string]catalog.Price{
+		"gpt-6.1-sol": {Input: 2, Output: 10}, "gpt-6-astra": {Input: 10, Output: 50},
+		"gpt-6-luna": {Input: 0.1, Output: 0.5}, "gpt-5.6-luna": {Input: 0.2, Output: 1.2},
+	}
+	priced := func(id string) (catalog.Price, bool) { p, ok := prices[id]; return p, ok }
+	none := func(string) (catalog.Price, bool) { return catalog.Price{}, false }
+	gpt6 := ids("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
+	for _, c := range []struct {
+		name  string
+		ms    []catalog.Model
+		price func(string) (catalog.Price, bool)
+		want  string
+	}{
+		{"priced", gpt6, priced, "gpt-6-luna"},
+		{"no prices: a luna", gpt6, none, "gpt-6-luna"},
+		{"no prices: a mini first", ids("gpt-5-codex", "gpt-5-codex-mini", "gpt-6-luna"), none, "gpt-5-codex-mini"},
+		{"no prices, no cheap name", ids("gpt-6.1-sol", "gpt-6-sol"), none, "gpt-6.1-sol"},
+		{"the model's own price first", []catalog.Model{{ID: "gpt-6.1-sol"}, {ID: "x", Price: &catalog.Price{Input: 0.01, Output: 0.01}}}, priced, "x"},
+	} {
+		if got := warmPick(c.ms, c.price).ID; got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
 	}
 }

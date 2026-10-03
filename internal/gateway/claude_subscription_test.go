@@ -449,3 +449,85 @@ done
 		}
 	}
 }
+
+// A conversation's next turn at another effort — the router picked it
+// (#502) — goes on in the same Claude Code, told the level by the control
+// request its SDK's applyFlagSettings sends, before the turn: a Claude Code
+// started anew is told the whole conversation in one message, and wrote all
+// of it to the cache again (430k tokens a switch between high and low).
+func TestClaudeRunKeptAcrossEffort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a shell script stands in for Claude Code")
+	}
+	dir := t.TempDir()
+	stdin := filepath.Join(dir, "stdin.log")
+	script := `#!/bin/sh
+echo "args $*" >> ` + stdin + `
+n=0
+while read -r line; do
+  printf '%s\n' "$line" >> ` + stdin + `
+  case "$line" in *control_request*)
+    echo '{"type":"control_response","response":{"subtype":"success","request_id":"x"}}'
+    continue;;
+  esac
+  n=$((n+1))
+  echo '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m","model":"claude-opus-5-5","usage":{"input_tokens":1}}}}'
+  echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"pid '$$' turn '$n'"}}}'
+  echo '{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}}'
+  echo '{"type":"stream_event","event":{"type":"message_stop"}}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":""}'
+done
+`
+	os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s := New()
+	p := provider.Provider{ID: "claude", Account: &provider.Account{Agent: "claude", User: "u"}}
+	ask := func(effort, msgs string) string {
+		t.Helper()
+		body := `{"model":"claude-opus-5-5","max_tokens":32000,"thinking":{"type":"adaptive"},"output_config":{"effort":"` + effort + `"},"system":"be brief","tools":[{"name":"read","input_schema":{"type":"object"}}],"messages":` + msgs + `}`
+		rec := httptest.NewRecorder()
+		var u Usage
+		if code, msg := s.serveClaudeSubscription(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)), provider.Anthropic, p, "claude-opus-5-5", []byte(body), &u); code != 200 {
+			t.Fatalf("%d %s", code, msg)
+		}
+		var res struct {
+			Content []struct{ Text string } `json:"content"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &res)
+		if len(res.Content) == 0 {
+			t.Fatalf("no answer: %s", rec.Body)
+		}
+		return res.Content[0].Text
+	}
+	msg := func(role, text string) string { return `{"role":"` + role + `","content":` + strconv.Quote(text) + `}` }
+
+	first := ask("high", `[`+msg("user", "hi")+`]`)
+	pid, _, _ := strings.Cut(strings.TrimPrefix(first, "pid "), " ")
+	conv := msg("user", "hi") + `,` + msg("assistant", first) + `,` + msg("user", "and?")
+	second := ask("low", `[`+conv+`]`)
+	if second != "pid "+pid+" turn 2" {
+		t.Fatalf("at another effort: %q, first %q", second, first)
+	}
+	third := ask("low", `[`+conv+`,`+msg("assistant", second)+`,`+msg("user", "so?")+`]`)
+	if third != "pid "+pid+" turn 3" {
+		t.Fatalf("third: %q", third)
+	}
+	b, _ := os.ReadFile(stdin)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 5 || !strings.Contains(lines[0], "--effort high") {
+		t.Fatalf("Claude Code was told:\n%s", b)
+	}
+	var ctl struct {
+		Type    string
+		Request struct {
+			Subtype  string
+			Settings map[string]any
+		}
+	}
+	if json.Unmarshal([]byte(lines[2]), &ctl) != nil || ctl.Type != "control_request" || ctl.Request.Subtype != "apply_flag_settings" || ctl.Request.Settings["effortLevel"] != "low" {
+		t.Fatalf("effort not set before the second turn: %s", lines[2])
+	}
+	if !strings.Contains(lines[3], `"type":"user"`) || !strings.Contains(lines[4], `"type":"user"`) {
+		t.Fatalf("turns: %s", b)
+	}
+}

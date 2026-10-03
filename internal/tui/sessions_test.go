@@ -18,6 +18,7 @@ import (
 func sessionsHome(t *testing.T) {
 	t.Helper()
 	h := home(t)
+	t.Setenv("HERMES_HOME", filepath.Join(h, ".hermes"))
 	for from, env := range map[string]string{"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"} {
 		dir := filepath.Join(h, "sessions", from)
 		if err := os.CopyFS(dir, os.DirFS(filepath.Join("..", "sessions", "testdata", from))); err != nil {
@@ -37,8 +38,10 @@ func sessionsHome(t *testing.T) {
 		return catalog.Price{}, false
 	}
 	t.Cleanup(func() {
-		time.Local, sessions.PriceOf = oldZone, oldPrice
+		// the page's index is written behind it: let that write finish before
+		// the zone it reads (a stat of the file it writes) goes back
 		sessions.Reset()
+		time.Local, sessions.PriceOf = oldZone, oldPrice
 	})
 	sessions.Reset()
 }

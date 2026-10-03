@@ -36,6 +36,11 @@ func TestPluginOwnIconAndKeyHint(t *testing.T) {
 	if lime.Icon != "https://ownicon.example/icon.png" {
 		t.Errorf("lime's icon = %q, want package.json's", lime.Icon)
 	}
+	// how many requests each account takes at once (Discord, Lemon): the
+	// auth hook's, else package.json's when the hook's isn't a whole number
+	if lemon.MaxConcurrency != 3 || lime.MaxConcurrency != 5 {
+		t.Errorf("maxConcurrency = %d, %d, want 3, 5", lemon.MaxConcurrency, lime.MaxConcurrency)
+	}
 	if len(lemon.Methods) != 2 || lemon.Methods[0] != (Method{Type: "api", Label: "Lemon API key (from lemon.example/keys)", Placeholder: "sk-lemon-…"}) || lemon.Methods[1].Placeholder != "" {
 		t.Fatalf("lemon's methods = %+v", lemon.Methods)
 	}

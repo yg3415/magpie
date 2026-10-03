@@ -32,6 +32,11 @@ type Option struct {
 	GroupIcon string `json:"groupIcon,omitempty"`
 	Ref       string `json:"ref,omitempty"`  // the catalog model, the same in every agent
 	Free      bool   `json:"free,omitempty"` // costs its subscription nothing
+	// Rate and RateWas are the credits a request costs its subscription,
+	// as a multiple, and before a discount running now (Qoder's 0.5×,
+	// WorkBuddy's x0.03), when its vendor lists them
+	Rate    float64 `json:"rate,omitempty"`
+	RateWas float64 `json:"rateWas,omitempty"`
 	// Context is the tokens the model takes, when known; the picker marks
 	// the large ones
 	Context int `json:"context,omitempty"`
@@ -39,6 +44,17 @@ type Option struct {
 	// sign-in or key, with magpie not in the way ("Anthropic"): its config
 	// then names no magpie endpoint, which is right, not a failed setup
 	Direct string `json:"direct,omitempty"`
+	// Same is a model magpie serves on the very account the agent is
+	// signed in to itself, so the agent reaches it on its own too: the
+	// picker folds these into one row a click opens (Claude Code, #496)
+	Same bool `json:"same,omitempty"`
+	// Alias is the value of the option a dated id is another name of
+	// (claude-opus-4-5-20251101 → claude-opus-4-5): the picker shows one
+	// row for the two, the alias, unless the dated one is the value set
+	Alias string `json:"alias,omitempty"`
+
+	// own: served on the agent's own sign-in (viaMagpie), for Same
+	own bool
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
@@ -78,6 +94,12 @@ type Agent struct {
 	// rather than asking the gateway, rewrites that list as the catalog is
 	// now — where magpie wrote one; nothing else changes (see SyncCatalog).
 	Sync func() error
+	// Unwire, for an agent whose fields' default is the agent as installed
+	// rather than what it had before magpie (Codex, Claude Code, Gemini
+	// CLI), takes magpie out of its config and puts back what the stash
+	// kept: the endpoint, provider and model the user had. Disconnect runs
+	// it before the fields' defaults.
+	Unwire func() error
 	// RenameRefs, for an agent whose config names magpie's models beyond
 	// its fields (omp's other roles and fallback chains), moves those names
 	// off provider from onto to, the rest of each kept; it answers whether
@@ -104,6 +126,9 @@ type Agent struct {
 	// for this machine's, and while the distro is stopped: opening it
 	// would start it.
 	Home string
+	// Gateway is the gateway's address as the agent reaches it, a WSL
+	// distro's own way to it; nil is gateway.URL.
+	Gateway func() string
 	// Import, for an app that takes magpie only through an import link of
 	// its own, which the user confirms there (Cindy), is that link; the app
 	// has no fields magpie sets. Added says whether it has magpie already.
@@ -355,6 +380,9 @@ func atomic(a *Agent, paths ...string) *Agent {
 	}
 	if sync := a.Sync; sync != nil {
 		a.Sync = func() error { return edit.Atomically(sync, paths...) }
+	}
+	if unwire := a.Unwire; unwire != nil {
+		a.Unwire = func() error { return edit.Atomically(unwire, paths...) }
 	}
 	return a
 }

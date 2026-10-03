@@ -67,6 +67,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const dailyWidth = (await page.locator("#chart .bar").first().boundingBox()).width;
         const select = async (i) => {
           await page.locator("#prefs").click();
+          await page.locator("#setTab-usage").click();
           await page.locator("#usageBucketSegs .opt").nth(i).click();
           await page.waitForFunction((i) => document.querySelectorAll("#usageBucketSegs .opt")[i]?.classList.contains("on"), i);
           await page.locator('[data-view="usage"]').click();
@@ -92,6 +93,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#prefs").click();
         await page.waitForFunction(() => document.querySelectorAll("#usageBucketSegs .opt")[2]?.classList.contains("on"));
         // Saving another preference must carry the chosen interval along.
+        await page.locator("#setTab-general").click();
         await page.locator("#themeSegs .opt").last().click();
         await page.waitForFunction(() => document.querySelectorAll("#themeSegs .opt")[2]?.classList.contains("on"));
         await page.reload();

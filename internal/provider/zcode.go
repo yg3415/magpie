@@ -1,5 +1,14 @@
 package provider
 
+// PLUGIN-SERVED (see AGENTS.md): ZCode ("zcode") is a deprecated built-in
+// subscription served by its plugin, @magpie-community/opencode-zcode-auth,
+// once moved onto it (provider.Moved; the default for a new sign-in). A
+// moved one's sign-ins, models, requests and usage are all the plugin's,
+// never this code's (only the move, in migrate*.go, still reads its
+// accounts). A fix here alone doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/zcode) and raise the
+// mover's min in internal/provider/migrate_zcode.go.
+
 // A ZCode subscription is Z.ai's GLM Coding Plan, which ZCode (Zhipu's
 // desktop app) signs in to. The plan is served on an Anthropic-compatible
 // endpoint to a plain API key, `<id>.<secret>`, that ZCode mints for the
@@ -41,6 +50,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -317,25 +327,37 @@ func zcodeProvider(who, plan string, k zcodeKey) Provider {
 			if zcodeJWTExpired(k.JWT) {
 				return errZCodeExpired
 			}
-			key = k.JWT
-			zcodeStartRequest(req, body)
+			zcodeStartRequest(req, k.Base, body)
+			// the token as a Bearer only, no x-api-key, as a client the
+			// Start Plan still serves sends it
+			req.Header.Del("x-api-key")
+			req.Header.Set("Authorization", "Bearer "+k.JWT)
+			return nil
 		}
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", key)
 		req.Header.Set("Authorization", "Bearer "+key)
 		return nil
 	}
+	acct.clientFor = zcodeStartClientFor
 	acct.explain = func(status int, body []byte) string {
-		if zcodeOnStart(nil, k) {
+		if zcodeOnStartAs(nil, k, plan) {
 			return zcodeStartExplain(status, body)
 		}
 		return ""
 	}
 	acct.models = func() []catalog.Model {
-		if zcodeOnStart(nil, k) {
+		if zcodeOnStartAs(nil, k, plan) {
 			return zcodeStartModels
 		}
 		return zcodeModels
+	}
+	// on the Start Plan, a model only the Coding Plan has (GLM-5.3) is
+	// neither listed nor picked, though the list fetched last (another
+	// account's, or this one's before its plan was found) has it
+	startServes := sync.OnceValue(zcodeStartServes)
+	acct.unusable = func(model string) bool {
+		return zcodeOnStartAs(nil, k, plan) && !startServes()(model)
 	}
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
 		b := base(zcodeOnStart(ctx, k))
@@ -345,7 +367,7 @@ func zcodeProvider(who, plan string, k zcodeKey) Provider {
 		}
 		return ms, catalog.SaveLive("zcode", b, ms)
 	}
-	return Provider{ID: "zcode", Name: "ZCode", Icon: "zcode", Anthropic: base(zcodeOnStart(nil, k)), Website: "https://zcode.z.ai", Account: acct}
+	return Provider{ID: "zcode", Name: "ZCode", Icon: "zcode", Anthropic: base(zcodeOnStartAs(nil, k, plan)), Website: "https://zcode.z.ai", Account: acct}
 }
 
 // ---- allowance ----------------------------------------------------------------

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -17,6 +18,54 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
+
+func TestMixedDecisionGateway(t *testing.T) {
+	fresh(t)
+	var paths []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			var q struct{ Model string }
+			json.NewDecoder(r.Body).Decode(&q)
+			if q.Model != "deepseek-v4.1-flash" {
+				http.Error(w, "wrong conversation model", 400)
+				return
+			}
+			io.WriteString(w, `{"id":"chat","choices":[{"index":0,"message":{"role":"assistant","content":"2"},"finish_reason":"stop"}]}`)
+		case "/v1/systemone":
+			var q struct{ Model string }
+			json.NewDecoder(r.Body).Decode(&q)
+			if q.Model != "typesafe/jev" {
+				http.Error(w, "wrong decision model", 400)
+				return
+			}
+			io.WriteString(w, `{"model":"typesafe/jev","answers":{"levels":{"type":"noul","noul":0},"intent":{"type":"choice","choice":"bug","confidence":0.9}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "mixed", Name: "Mixed", Key: "k", Chat: up.URL + "/v1", Decide: up.URL + "/v1", Models: []string{"deepseek-v4.1-flash", "typesafe/jev"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if code, body := postAs(t, s, "", `{"model":"mixed/deepseek-v4.1-flash","messages":[{"role":"user","content":"hello"}]}`); code != 200 || !strings.Contains(body, `"content":"2"`) {
+		t.Fatalf("conversation: %d %s", code, body)
+	}
+	if code, _ := postAs(t, s, "", `{"model":"mixed/typesafe/jev","messages":[{"role":"user","content":"hello"}]}`); code != 400 {
+		t.Fatalf("Jev conversation: %d", code)
+	}
+	for _, model := range []string{"mixed/deepseek-v4.1-flash", "mixed/typesafe/jev"} {
+		if v, err := s.askClassifier(model, []string{"feature", "bug"}, before{}, false, "fix this"); err != nil || v.Intent != "bug" {
+			t.Fatalf("classify with %s: %+v %v", model, v, err)
+		}
+	}
+	if strings.Join(paths, ",") != "/v1/chat/completions,/v1/chat/completions,/v1/systemone,/v1/systemone" {
+		t.Fatalf("upstream endpoints: %v", paths)
+	}
+}
 
 // jevUp is a System One API: it answers each question it is asked with
 // what choice and score say, and keeps what it was asked.
@@ -366,6 +415,9 @@ func TestWithEffort(t *testing.T) {
 		{provider.Chat, `{"model":"m"}`, "high", []string{`{"model":"m"}`}},
 		{provider.Responses, `{"reasoning":{"effort":"medium","summary":"auto"}}`, "xhigh", []string{`"effort":"xhigh"`, `"summary":"auto"`}},
 		{provider.Responses, `{"reasoning":{"effort":"none"}}`, "high", []string{`"effort":"none"`}},
+		// Codex's Responses Lite (gpt-6.1-sol on a ChatGPT account): the
+		// backend turns the request away without context all_turns (#534)
+		{provider.Responses, `{"reasoning":{"effort":"high","summary":"auto","context":"all_turns"}}`, "medium", []string{`"effort":"medium"`, `"summary":"auto"`, `"context":"all_turns"`}},
 		{provider.Anthropic, `{"max_tokens":32000,"thinking":{"type":"adaptive"}}`, "low", []string{`"output_config":{"effort":"low"}`}},
 		{provider.Anthropic, `{"max_tokens":32000,"thinking":{"type":"enabled","budget_tokens":4096}}`, "high", []string{`"budget_tokens":24000`}},
 		{provider.Anthropic, `{"max_tokens":8000,"thinking":{"type":"enabled","budget_tokens":4096}}`, "xhigh", []string{`"budget_tokens":7999`}},
@@ -376,6 +428,35 @@ func TestWithEffort(t *testing.T) {
 			if !strings.Contains(got, w) {
 				t.Errorf("%s %s at %s: %s, want %s", c.proto, c.in, c.effort, got, w)
 			}
+		}
+	}
+}
+
+// A turn at another effort changes nothing of what the vendor caches (#502):
+// for Claude thinking adaptively, output_config's effort alone, its thinking
+// as it was; for the Responses API, reasoning's effort alone — not the
+// instructions, tools, input or prompt_cache_key.
+func TestWithEffortKeepsTheCachedPrefix(t *testing.T) {
+	for _, c := range []struct {
+		proto provider.Protocol
+		in    string
+		field string
+	}{
+		{provider.Anthropic, `{"model":"claude-opus-5-5","max_tokens":32000,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"read","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"a <b> & c","cache_control":{"type":"ephemeral"}}]}]}`, "output_config"},
+		{provider.Responses, `{"model":"gpt-6-astra","instructions":"sys","prompt_cache_key":"thread","reasoning":{"effort":"xhigh","summary":"auto"},"tools":[{"type":"function","name":"read"}],"input":[{"role":"user","content":"a <b> & c"}]}`, "reasoning"},
+	} {
+		lo, hi := withEffort(c.proto, []byte(c.in), "low"), withEffort(c.proto, []byte(c.in), "high")
+		var a, b map[string]json.RawMessage
+		if json.Unmarshal(lo, &a) != nil || json.Unmarshal(hi, &b) != nil {
+			t.Fatalf("%s: %s / %s", c.proto, lo, hi)
+		}
+		for k := range a {
+			if k != c.field && !bytes.Equal(a[k], b[k]) {
+				t.Errorf("%s: %s changed with the effort: %s / %s", c.proto, k, a[k], b[k])
+			}
+		}
+		if bytes.Equal(a[c.field], b[c.field]) {
+			t.Errorf("%s: effort not changed: %s", c.proto, a[c.field])
 		}
 	}
 }

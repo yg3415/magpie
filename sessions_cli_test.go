@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
@@ -26,10 +27,11 @@ func sessionsHome(t *testing.T) time.Time {
 	// OpenCode's and Pi's folders in the sandbox too (HOME isn't the home
 	// on Windows)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(h, ".local", "share"))
+	for _, k := range agentenv.Vars {
+		t.Setenv(k, "")
+	}
 	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(h, ".pi", "agent"))
-	t.Setenv("OPENCODE_DB", "")
-	t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
-	t.Setenv("DSH_HOME", "")
+
 	for from, env := range map[string]string{"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"} {
 		dir := filepath.Join(h, "."+from)
 		if err := os.CopyFS(dir, os.DirFS(filepath.Join("internal", "sessions", "testdata", from))); err != nil {
@@ -49,8 +51,10 @@ func sessionsHome(t *testing.T) time.Time {
 		return catalog.Price{}, false
 	}
 	t.Cleanup(func() {
-		time.Local, sessions.PriceOf = oldZone, oldPrice
+		// the index is written behind the page: let that write finish before
+		// the zone it reads (a stat of the file it writes) goes back
 		sessions.Reset()
+		time.Local, sessions.PriceOf = oldZone, oldPrice
 	})
 	sessions.Reset()
 	return time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)

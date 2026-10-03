@@ -16,6 +16,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // A client may offer its model the web search of the vendor it was made
@@ -74,11 +75,13 @@ func searchesItself(p provider.Provider, proto provider.Protocol) bool {
 	return slices.Contains(searchHosts[proto], provider.HostOf(p.Base(proto)))
 }
 
-// searchHosts are the APIs that search by themselves: OpenAI's and xAI's
-// web_search tool, Anthropic's web_search_20250305, OpenRouter's web
-// plugin, Gemini's googleSearch.
+// searchHosts are the APIs that search by themselves: OpenAI's, xAI's and
+// DeepSeek's web_search tool (DeepSeek's on its Responses API only: its
+// Chat API has no search tool, and whether its Anthropic one searches isn't
+// known), Anthropic's web_search_20250305, OpenRouter's web plugin,
+// Gemini's googleSearch.
 var searchHosts = map[provider.Protocol][]string{
-	provider.Responses: {"api.openai.com", "api.x.ai"},
+	provider.Responses: {"api.openai.com", "api.x.ai", "api.deepseek.com"},
 	provider.Anthropic: {"api.anthropic.com"},
 	provider.Chat:      {"openrouter.ai"},
 	provider.Gemini:    {"generativelanguage.googleapis.com"},
@@ -94,33 +97,46 @@ func searchAsked(proto provider.Protocol, body []byte) bool {
 	return err == nil && req.WebSearch
 }
 
-// searcher is the model magpie searches with: the first of the providers
-// that search by themselves, with a small model of theirs, as searching
-// needs no more. A relay said to search is left out: it would spend the
-// relay's quota on other models' searches, and one that serves only Claude
-// Code refuses magpie's own request, which has no metadata.user_id (#359).
+// searcher is the model magpie searches with: the one Settings names, while
+// it can (chosenSearcher), else the first of the providers that search by
+// themselves, with a small model of theirs, as searching needs no more.
 func searcher() (provider.Provider, string, bool) {
-	rank := func(p provider.Provider) int {
-		p.Searches = false
-		switch {
-		case p.Account != nil && p.Account.Agent == "claude":
-			return 0
-		case p.Account != nil && p.Account.Agent == "codex":
-			return 1
-		case searchesItself(p, provider.Anthropic):
-			return 2
-		case searchesItself(p, provider.Responses):
-			return 3
-		case searchesItself(p, provider.Chat):
-			return 4
-		}
-		return -1
+	if p, m, why := chosenSearcher(); why == "" && p != nil {
+		return *p, m, true
 	}
+	return autoSearcher()
+}
+
+// searchRank is where a provider comes among those that can search for a
+// model that can't, -1 when it can't. A relay said to search is left out:
+// it would spend the relay's quota on other models' searches, and one that
+// serves only Claude Code refuses magpie's own request, which has no
+// metadata.user_id (#359).
+func searchRank(p provider.Provider) int {
+	p.Searches = false
+	switch {
+	case p.Account != nil && p.Account.Agent == "claude":
+		return 0
+	case p.Account != nil && p.Account.Agent == "codex":
+		return 1
+	case searchesItself(p, provider.Anthropic):
+		return 2
+	case searchesItself(p, provider.Responses):
+		return 3
+	case searchesItself(p, provider.Chat):
+		return 4
+	}
+	return -1
+}
+
+// autoSearcher is the searcher magpie picks by itself: the first by
+// searchRank that is on, with its small model.
+func autoSearcher() (provider.Provider, string, bool) {
 	var best provider.Provider
 	var model string
 	top := -1
 	for _, p := range provider.All() {
-		r := rank(p)
+		r := searchRank(p)
 		if r < 0 || !p.On() || (top >= 0 && r >= top) {
 			continue
 		}
@@ -129,6 +145,92 @@ func searcher() (provider.Provider, string, bool) {
 		}
 	}
 	return best, model, top >= 0
+}
+
+// Why the searcher Settings names isn't used, and magpie picks one itself.
+const (
+	SearcherGone   = "gone"    // no such provider any more
+	SearcherOff    = "off"     // turned off, or signed out
+	SearcherCant   = "cant"    // it can't search the web by itself
+	SearcherNoneOf = "nomodel" // it lists no model to search with
+)
+
+// chosenSearcher is the provider and model Settings' Searcher names
+// ("<provider>" for its small model, or "<provider>/<model>"), and why it
+// can't be used, "" when it can. A model it no longer lists gives way to
+// its small model, as when none is named. Nil when none is named.
+func chosenSearcher() (*provider.Provider, string, string) {
+	v := strings.TrimSpace(settings.Load().Searcher)
+	if v == "" {
+		return nil, "", ""
+	}
+	id, model, _ := strings.Cut(v, "/")
+	i := slices.IndexFunc(provider.All(), func(p provider.Provider) bool { return p.ID == id })
+	if i < 0 {
+		return nil, "", SearcherGone
+	}
+	p := provider.All()[i]
+	switch {
+	case !p.On():
+		return &p, "", SearcherOff
+	case searchRank(p) < 0:
+		return &p, "", SearcherCant
+	}
+	if model != "" && slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return m.ID == model }) {
+		return &p, model, ""
+	}
+	if m := smallModel(p, nil); m != "" {
+		return &p, m, ""
+	}
+	if ms := p.Available(); len(ms) > 0 {
+		return &p, ms[0].ID, ""
+	}
+	return &p, "", SearcherNoneOf
+}
+
+// Searchers are the providers Settings' Searcher may name: those on that
+// can search for a model that can't, in the order magpie would pick them,
+// each with the model it would search with.
+func Searchers() []SearcherChoice {
+	var out []SearcherChoice
+	for _, p := range provider.All() {
+		r := searchRank(p)
+		if r < 0 || !p.On() {
+			continue
+		}
+		var ms []catalog.Model
+		for _, m := range p.Available() {
+			if !strings.HasPrefix(m.ID, provider.GroupPrefix) {
+				ms = append(ms, m)
+			}
+		}
+		if len(ms) == 0 {
+			continue
+		}
+		out = append(out, SearcherChoice{Provider: p, Small: smallModel(p, nil), Models: ms, rank: r})
+	}
+	slices.SortStableFunc(out, func(a, b SearcherChoice) int { return cmp.Compare(a.rank, b.rank) })
+	return out
+}
+
+// SearcherChoice is a provider Settings' Searcher may name.
+type SearcherChoice struct {
+	Provider provider.Provider
+	Small    string // the model it searches with when none is named
+	Models   []catalog.Model
+	rank     int
+}
+
+// RelaysSaidToSearch are the providers on that are said to search by
+// themselves but are never asked to search for another model (#359).
+func RelaysSaidToSearch() []provider.Provider {
+	var out []provider.Provider
+	for _, p := range provider.All() {
+		if p.Searches && p.On() && searchRank(p) < 0 {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // smallModel is the provider's cheapest small model of a vendor that

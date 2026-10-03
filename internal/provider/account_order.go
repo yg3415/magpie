@@ -4,7 +4,7 @@ import "fmt"
 
 // SetAccountOrder changes the order used by routing, not just its presentation.
 // The first enabled account becomes first through the same switch used by Make
-// first. Disabled accounts can be moved, but never silently enabled by a drag.
+// first, unless the agent is kept signed in to another (KeepLoginAs). Disabled accounts can be moved, but never silently enabled by a drag.
 func SetAccountOrder(id string, order []string) error {
 	p, err := Find(id)
 	if err != nil {
@@ -88,7 +88,9 @@ func arrangeLoginsAs(agent, stored string, order []string) error {
 	}
 	err := writeLogins(ls)
 	loginsMu.Unlock()
-	if err != nil || first.Active {
+	// kept signed in to an account of the user's choosing, the order is
+	// the gateway's alone: the sign-in stays (#524)
+	if err != nil || first.Active || keptAs(agent) != "" {
 		return err
 	}
 	if err = SwitchLogin(agent, order[0]); err == nil {

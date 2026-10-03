@@ -155,6 +155,7 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 			ID: m.ID, Name: m.Name, Provider: pp.ID, Released: m.Released,
 			APIs: []string{string(pluginProtocol(pp.ID, m))}, Images: m.Image,
 			Context: m.Input, Output: m.Output, Free: m.Free,
+			Rate: m.Rate, RateWas: m.RateWas,
 		}
 		if c.Context == 0 {
 			c.Context = m.Context
@@ -231,6 +232,11 @@ func pluginProvider(pp plugin.Provider, l pluginLogin) Provider {
 		// Codex's namespaced tools go to Grok flat, as the built-in sends
 		// them (#404): the plugin's own rewrite would leave them out
 		a.body = grokBody
+	}
+	if pp.ID == "zed" {
+		// an OpenAI model's request as Zed's cloud reads it: Codex's
+		// developer messages as system ones, its namespaced tools flat
+		a.body = ZedBody
 	}
 	a.models = func() []catalog.Model {
 		if cur, ok := PluginOf(id); ok {
@@ -465,10 +471,16 @@ func firstOf(ss ...string) string {
 }
 
 // Do sends req, through the account's own transport when it has one (a
-// plugin's) and client otherwise.
+// plugin's), the client the account asks for this request when it asks
+// for one (ZCode's Start Plan: zcodeStartClient), and client otherwise.
 func (p Provider) Do(client *http.Client, req *http.Request) (*http.Response, error) {
 	if p.Account != nil && p.Account.transport != nil {
 		return p.Account.transport(req)
+	}
+	if p.Account != nil && p.Account.clientFor != nil {
+		if c := p.Account.clientFor(req); c != nil {
+			client = c
+		}
 	}
 	req.Header.Del(ConversationHeader)
 	return client.Do(req)

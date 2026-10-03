@@ -15,7 +15,6 @@ package agent
 // and out the other way round.
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -38,18 +37,22 @@ const kimiContext = 128000
 // when it first starts, and once that's done never reads ~/.kimi again, so a
 // model written there is one it never sees (#290). ~/.kimi is kimi-cli's only where
 // the new one isn't: no ~/.kimi-code, nor $KIMI_CODE_HOME.
-func KimiDir(home string) (dir string, legacy bool) {
-	if d := os.Getenv("KIMI_CODE_HOME"); d != "" {
+func KimiDir(home string) (dir string, legacy bool) { return kimiDir(here(home)) }
+
+// kimiDir is KimiDir at a place: in a WSL distro its variables aren't
+// read, and a stopped one's is ~/.kimi-code until it is looked at.
+func kimiDir(at place) (dir string, legacy bool) {
+	if d := at.getenv("KIMI_CODE_HOME"); d != "" {
 		return d, false
 	}
-	code := filepath.Join(home, ".kimi-code")
-	if isDir(code) {
+	code := filepath.Join(at.home, ".kimi-code")
+	if at.isDir(code) {
 		return code, false
 	}
-	if d := os.Getenv("KIMI_SHARE_DIR"); d != "" {
+	if d := at.getenv("KIMI_SHARE_DIR"); d != "" {
 		return d, true
 	}
-	if d := filepath.Join(home, ".kimi"); isDir(d) {
+	if d := filepath.Join(at.home, ".kimi"); at.isDir(d) {
 		return d, true
 	}
 	return code, false
@@ -113,8 +116,12 @@ func kimiEfforts(efforts []string) []edit.KV {
 	return kvs
 }
 
-func kimi(home string) *Agent {
-	dir, legacy := KimiDir(home)
+func kimi(home string) *Agent { return kimiIn(here(home)) }
+
+// kimiIn is Kimi Code at a place: this machine's home, or a WSL distro's
+// (see wsl.go), its provider naming the gateway as it reaches it from there.
+func kimiIn(at place) *Agent {
+	dir, legacy := kimiDir(at)
 	path := filepath.Join(dir, "config.toml")
 	key := "kimi:" + path + ":default_model"
 	get := func() string { v, _ := edit.GetTOMLTop(path, "default_model"); return v }
@@ -122,7 +129,7 @@ func kimi(home string) *Agent {
 	writeMagpie := func() error {
 		if err := edit.SetTOMLTable(path, providerTable,
 			edit.KV{Path: "type", Value: "kimi"},
-			edit.KV{Path: "base_url", Value: gatewayV1()},
+			edit.KV{Path: "base_url", Value: at.v1()},
 			edit.KV{Path: "api_key", Value: gateway.Token},
 		); err != nil {
 			return err
@@ -184,7 +191,7 @@ func kimi(home string) *Agent {
 				return "Kimi Code's [" + providerTable + "] (config.toml) is gone, so it no longer reaches magpie"
 			}
 			return wiringOff("Kimi Code", path, func(k string) (string, bool) { v, ok := t[k]; return v, ok },
-				"base_url", gatewayV1(), "api_key", gateway.Token)
+				"base_url", at.v1(), "api_key", gateway.Token)
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",

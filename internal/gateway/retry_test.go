@@ -20,6 +20,7 @@ type scripted struct {
 	replies []reply
 	n       int
 	hang    chan struct{} // when set, the first request waits on it
+	limited http.Header   // headers each 429 goes with
 }
 
 type reply struct {
@@ -40,6 +41,11 @@ func (s *scripted) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		x.ctype = "application/json"
 	}
 	w.Header().Set("Content-Type", x.ctype)
+	if x.code == http.StatusTooManyRequests {
+		for k, vs := range s.limited {
+			w.Header()[k] = vs
+		}
+	}
 	if x.code != 0 {
 		w.WriteHeader(x.code)
 	}
@@ -196,6 +202,46 @@ func TestLastOneLeftIsTriedAgain(t *testing.T) {
 	scriptedOn(t, "a", provider.Chat, a)
 	if code, _ := postAs(t, New(), "", `{"model":"a/m","messages":[{"role":"user","content":"hi"}]}`); code != 400 || a.n != 1 {
 		t.Fatalf("a request at fault: %d after %d tries", code, a.n)
+	}
+}
+
+// A rate limit on the last one left is waited out, a moment, whether the
+// vendor says how long or not (#503: a relay's 429 with no Retry-After went
+// straight to the agent); one that won't clear in seconds — a plan used up,
+// no money left, a Retry-After an hour away — is the agent's at once.
+func TestRateLimitIsWaitedOut(t *testing.T) {
+	limited := `{"error":{"message":"Rate limit exceeded, please try again later"}}`
+	for _, x := range []struct {
+		name    string
+		said    string
+		header  http.Header
+		times   int // how many times it is limited first
+		code, n int
+	}{
+		{"retry-after", limited, http.Header{"Retry-After": {"1"}}, 1, 200, 2},
+		{"no retry-after", limited, nil, 1, 200, 2},
+		{"relay's own words", `{"error":{"message":"当前分组上游负载已饱和，请稍后再试"}}`, nil, 2, 200, 3},
+		{"thrice", limited, nil, 3, 200, 4},
+		{"too long", limited, nil, 9, 429, 1 + rateRetries},
+		{"usage limit", `{"error":{"message":"You've hit your usage limit. Your limit resets in 5 hours."}}`, nil, 9, 429, 1},
+		{"no balance", `{"error":{"message":"余额不足"}}`, nil, 9, 429, 1},
+		{"an hour away", limited, http.Header{"Retry-After": {"3600"}}, 9, 429, 1},
+	} {
+		fresh(t)
+		a := &scripted{limited: x.header}
+		for range x.times {
+			a.replies = append(a.replies, reply{429, "", x.said})
+		}
+		a.replies = append(a.replies, reply{200, "", chatOK})
+		scriptedOn(t, "a", provider.Chat, a)
+		start := time.Now()
+		code, body := postAs(t, New(), "", `{"model":"a/m","messages":[{"role":"user","content":"hi"}]}`)
+		if code != x.code || a.n != x.n {
+			t.Errorf("%s: %d after %d tries: %s", x.name, code, a.n, body)
+		}
+		if x.n == 1 && time.Since(start) > time.Second {
+			t.Errorf("%s: passed on after %v", x.name, time.Since(start))
+		}
 	}
 }
 

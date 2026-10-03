@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -19,6 +20,16 @@ func init() {
 		pkg:    "@magpie-community/opencode-devin-auth",
 		min:    "0.1.5", // a failure's status and its sign-in mark as the built-in's
 		agents: []string{"devin"},
+		// a variant picked before the families were one model (swe-2-high)
+		// goes to Devin as it is, through the plugin too, which keeps the
+		// picks it is given; Adaptive and Fusion the built-in never served
+		served: func(model string, listed []string) bool {
+			if id := strings.ToLower(model); id == "adaptive" || id == "fusion" {
+				return true
+			}
+			base := devinBase(model)
+			return base != model && slices.Contains(listed, base)
+		},
 		out: func() ([]Moving, error) {
 			var out []Moving
 			for _, l := range devinLogins() {
@@ -210,7 +221,7 @@ func init() {
 	// the plugin reads cursor-agent's token as the built-in does.
 	movers["cursor"] = &mover{
 		pkg:    "@magpie-community/opencode-cursor-auth",
-		min:    "0.1.5", // a failure's status and its sign-in mark as the built-in's
+		min:    "0.1.8", // a failure's status and its sign-in mark as the built-in's; Max Mode models retried in Max Mode; glm-5.3 listed; catalog entries written as CallDynamicTool calls, an empty turn retried (plugins #11)
 		agents: []string{"cursor"},
 		out: func() ([]Moving, error) {
 			if CursorExecutable() == "" || cursorSignedOut() {

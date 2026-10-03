@@ -11,11 +11,16 @@ func setDock(bool, bool)                           {}
 // glidePanel steps the shown panel to height a frame at a time, keeping it
 // by the tray icon as it goes.
 func (h *host) glidePanel(height int, g Glide) bool {
-	_, from := h.panel.Size()
+	w := h.panel
+	_, from := w.Size()
 	gen := h.glides.Add(1)
 	go stepGlide(g, from, height, func() bool { return h.glides.Load() == gen }, func(v int) {
-		h.panel.SetSize(h.panelW(), v)
-		_ = h.tray.PositionWindow(h.panel, 6)
+		application.InvokeSync(func() {
+			if h.panel == w { // not let go meanwhile (lightweight mode)
+				w.SetSize(h.panelW(), v)
+				_ = h.tray.PositionWindow(w, 6)
+			}
+		})
 	})
 	return true
 }

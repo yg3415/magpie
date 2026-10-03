@@ -133,8 +133,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       const missing = await page.evaluate(() => [
         "Auto-use", "{who} no longer uses a reset by itself", "{who} uses a reset by itself once its week is used up",
-        "On: a reset is used by itself when this account's week is used up and no other account can answer, one a week at most. Click to turn it off.",
-        "Use a reset by itself when this account's week is used up and no other account can answer, one a week at most. The five hours running out never uses one.",
+        "On: a reset is used by itself when this account's week is used up and no other account can answer, one a week at most, and one about to run out unused is used shortly before it does. Click to turn it off.",
+        "Use a reset by itself when this account's week is used up and no other account can answer, one a week at most. A reset about to run out is used shortly before it does, if the account has been used. The five hours running out never uses one.",
       ].filter((k) => !I18N.zh[k]));
       assert.deepEqual(missing, [], "every string has its Chinese");
       assert.deepEqual(errors, []);

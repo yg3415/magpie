@@ -1,20 +1,34 @@
 package provider
 
+// PLUGIN-SERVED (see AGENTS.md): Factory ("factory") is a deprecated
+// built-in subscription served by its plugin,
+// @magpie-community/opencode-factory-auth, once moved onto it
+// (provider.Moved; the default for a new sign-in). A moved one's sign-ins,
+// models, requests and usage are all the plugin's, never this code's (only
+// the move, in migrate*.go, still reads its accounts). A fix here alone
+// doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/factory) and raise the
+// mover's min in internal/provider/migrate_factory.go.
+
 // A Factory subscription is the account Factory's Droid CLI signs in to
 // (factory.ai: Pro, Plus, Max). Its models are served under Factory's own
 // API, each on the wire it speaks natively: Claude on Anthropic's Messages
 // at /api/llm/a, GPT and Grok on OpenAI's Responses at /api/llm/o/v1, the
-// open models Factory hosts on chat completions beside it. The model field
-// is Factory's own model id; the server picks the vendor behind it.
+// open models Factory hosts on chat completions beside it, and Gemini on
+// Google's generateContent at /api/llm/g/v1/generate. The model field is
+// Factory's own model id; the server picks the vendor behind it.
 //
 // The sign-in is droid's own: WorkOS's device flow under droid's client, run
 // by magpie and kept in logins.json. droid's own login is encrypted with a
 // key in the keychain and its refresh token rotates, so magpie never reads
 // or shares it; each account magpie signs in is its own.
 //
-// Read from droid 0.229.0 (the npm package @factory/cli-darwin-arm64).
+// Read from droid 0.229.0 (the npm package @factory/cli-darwin-arm64); the
+// model table, the headers and the system prompt's opening line
+// (factory_client.go) checked against droid 0.231.0's binary.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,11 +51,22 @@ var (
 	factoryAPIEU  = "https://api.eu.factory.ai"
 )
 
+// FactoryBaseForTest points Factory's API at api, and its EU region at eu,
+// until the returned function runs. A provider built after the call uses
+// them. Tests outside this package use it.
+func FactoryBaseForTest(api, eu string) func() {
+	oldA, oldE := factoryAPI, factoryAPIEU
+	factoryAPI, factoryAPIEU = api, eu
+	return func() {
+		factoryAPI, factoryAPIEU = oldA, oldE
+	}
+}
+
 const (
 	// factoryClientID is droid's WorkOS client, production.
 	factoryClientID = "client_01HNM792M5G5G1A2THWPXKFMXB"
 	// factoryVersion is the droid release magpie's requests say they are.
-	factoryVersion = "0.229.0"
+	factoryVersion = "0.231.0"
 	// factoryRefreshLead is how long before an access token lapses it is
 	// renewed; droid renews a minute ahead, magpie a little more.
 	factoryRefreshLead = 2 * time.Minute
@@ -75,6 +100,10 @@ type factoryCreds struct {
 	// Prem is whoami's premBaseHostV2: an org Factory serves from a host
 	// of its own, where droid sends its model requests instead.
 	Prem string `json:"premBaseHost,omitempty"`
+	// Key: Access is a Factory API key (fk-…), as droid takes from
+	// FACTORY_API_KEY: sent as it is, never renewed, with no active org
+	// (droid's comes from a sign-in) — see factory_key.go.
+	Key bool `json:"apiKey,omitempty"`
 }
 
 // base is the Factory API the account's org is served from.
@@ -292,6 +321,9 @@ func factoryFresh(ctx context.Context, user string) (factoryCreds, error) {
 	if !valid {
 		return factoryCreds{}, errors.New("Factory: unreadable sign-in")
 	}
+	if c.Key {
+		return c, nil // an API key: nothing to renew, and no org with it
+	}
 	if c.ExpiresAt > 0 && time.Now().UnixMilli() < c.ExpiresAt-factoryRefreshLead.Milliseconds() {
 		return factoryOrgOf(ctx, l.User, c), nil
 	}
@@ -441,8 +473,8 @@ func factoryMendOrg(ctx context.Context, user string, status int, body []byte) b
 		return false
 	}
 	c, valid := factorySaved(l)
-	if !valid {
-		return false
+	if !valid || c.Key {
+		return false // an API key carries no org droid would send
 	}
 	if c.Active != "" {
 		if !refused {
@@ -482,14 +514,11 @@ func factoryMendOrg(ctx context.Context, user string, status int, body []byte) b
 }
 
 // factoryExplain is what the user can do about a 403 Factory still answers
-// once magpie has sent what droid sends. Factory takes a subscription's
-// model requests only from Droid: in #242 the same account's Claude, GPT and
-// GLM models answered droid through magpie every time, with magpie's
-// headers, and refused Grok Build's and Claude Code's every time, on the
-// same models and efforts, a request's body (droid's system prompt opens
-// with its own "You are Droid…") the only difference. So the first thing to
-// say is to use the models from Droid; an org's model policy or the plan is
-// what is left when Droid is refused too.
+// once the request opens as Droid's does (factoryDroidBody): the line first
+// on Responses, chat completions, Anthropic's Messages and Gemini's
+// generateContent. A 403 left is Factory telling the request apart some
+// other way, or the organization's model policy or the plan, which refuses
+// Droid too.
 func factoryExplain(status int, body []byte) string {
 	if status != http.StatusForbidden {
 		return ""
@@ -497,7 +526,7 @@ func factoryExplain(status int, body []byte) string {
 	if factoryOrgRefused(status, body) {
 		return "the Factory account's organization changed; remove the account in magpie and sign in to it again"
 	}
-	return "Factory takes a Factory subscription's requests only from Droid itself: other agents' (Claude Code, Grok Build…) are refused even on models Droid runs through magpie, so use the Factory models from Droid; if Droid is refused too, the organization's model policy or the plan doesn't allow this model"
+	return "Factory takes a Factory subscription's requests only from Droid itself. magpie already opens other agents' requests with Droid's line, and Factory may still tell them apart; use the model from Droid, and if Droid is refused it too, the organization's model policy or the plan doesn't allow this model"
 }
 
 // factoryFirstOrg is the first WorkOS org /api/cli/org says the account is
@@ -553,8 +582,10 @@ type factoryModel struct {
 	images   bool
 }
 
-// factoryModels are the ones droid's /model picker offers, less Gemini's
-// (sent on a route of Factory's own) and auto (droid picks it client side).
+// factoryModels are the ones droid's /model picker offers, less auto (droid
+// picks it client side). Gemini's are the ones droid 0.231.0's CLI registry
+// still offers (provider google); 2.5 and Gemini 3 Pro Image are
+// availableInCLI false there, and stay out. They go to /api/llm/g.
 var factoryModels = []factoryModel{
 	{"claude-fable-5.1", "Fable 5.1", Anthropic, "anthropic", 867000, 128000, []string{"low", "medium", "high", "xhigh", "max"}, true},
 	{"claude-fable-5", "Fable 5", Anthropic, "anthropic", 867000, 128000, []string{"low", "medium", "high", "xhigh", "max"}, true},
@@ -576,8 +607,14 @@ var factoryModels = []factoryModel{
 	{"gpt-5.3-codex", "GPT-5.3-Codex", Responses, "openai", 400000, 128000, []string{"low", "medium", "high", "xhigh"}, true},
 	{"grok-4.7", "Grok 4.7", Responses, "xai", 500000, 63356, []string{"low", "medium", "high", "xhigh"}, true},
 	{"grok-4.6", "Grok 4.6", Responses, "xai", 200000, 63356, []string{"low", "medium", "high", "xhigh"}, true},
+	{"gemini-3.1-pro-preview", "Gemini 3.1 Pro", Gemini, "google", 1000000, 65536, []string{"low", "medium", "high"}, true},
+	{"gemini-3.8-flash", "Gemini 3.8 Flash", Gemini, "google", 1000000, 65536, []string{"low", "medium", "high"}, true},
+	{"gemini-3.7-flash", "Gemini 3.7 Flash", Gemini, "google", 1000000, 65536, []string{"low", "medium", "high"}, true},
+	{"gemini-3.6-flash", "Gemini 3.6 Flash", Gemini, "google", 1000000, 65536, []string{"low", "medium", "high"}, true},
+	{"gemini-3.5-flash", "Gemini 3.5 Flash", Gemini, "google", 1000000, 65536, []string{"minimal", "low", "medium", "high"}, true},
+	{"gemini-3-flash-preview", "Gemini 3 Flash", Gemini, "google", 1000000, 65536, []string{"minimal", "low", "medium", "high"}, true},
 	{"glm-5.3", "GLM-5.3", Chat, "fireworks", 1040000, 131072, []string{"low", "high", "max"}, false},
-	{"glm-5.3-flash", "GLM-5.3-Flash", Chat, "fireworks", 1048576, 131072, []string{"low", "high", "max"}, false},
+	{"glm-5.3-flash", "GLM-5.3-Flash", Chat, "fireworks", 1048576, 131072, []string{"low", "high", "max"}, true},
 	{"glm-5.2", "GLM-5.2", Chat, "baseten", 1040000, 131072, []string{"high", "max"}, false},
 	{"kimi-k3", "Kimi K3", Chat, "fireworks", 262144, 65536, []string{"low", "high", "max"}, true},
 	{"deepseek-v4.1-flash", "DeepSeek V4.1 Flash", Chat, "fireworks", 1040000, 131072, []string{"low", "high", "max"}, true},
@@ -590,10 +627,11 @@ var factoryModels = []factoryModel{
 
 // factoryCore is whether a model is one of the open ones Factory hosts,
 // billed to Droid Core; droid's registry has every one of them as provider
-// "factory", served by Fireworks, Baseten or Mistral.
+// "factory", served by Fireworks, Baseten or Mistral. Gemini is Google's,
+// on the standard pool with Claude, GPT and Grok.
 func factoryCore(id string) bool {
 	m, ok := factoryModelOf(id)
-	return ok && m.upstream != "anthropic" && m.upstream != "openai" && m.upstream != "xai"
+	return ok && m.upstream != "anthropic" && m.upstream != "openai" && m.upstream != "xai" && m.upstream != "google"
 }
 
 func factoryModelOf(id string) (factoryModel, bool) {
@@ -616,13 +654,13 @@ func factoryCatalog() []catalog.Model {
 	return out
 }
 
-// factoryAPIs is the API a model is served on; nil for one droid didn't
-// list, which may be tried on any.
+// factoryAPIs is the API a model is served on. One droid didn't list may be
+// tried on the three wires the other models use, not on Gemini's generate.
 func factoryAPIs(model string) []Protocol {
 	if m, ok := factoryModelOf(model); ok {
 		return []Protocol{m.api}
 	}
-	return nil
+	return []Protocol{Chat, Responses, Anthropic}
 }
 
 // ---- the provider ---------------------------------------------------------
@@ -661,6 +699,13 @@ func factoryProvider(a factoryLogin) Provider {
 			// droid's Anthropic client is made with the key "placeholder",
 			// which Anthropic's SDK sends beside the bearer token
 			req.Header.Set("X-Api-Key", "placeholder")
+		}
+		// another agent's request opens as droid's does (factoryDroidBody),
+		// on /api/llm/o, on Anthropic's Messages, and on Gemini's generate
+		if nb := factoryDroidBody(req.URL.Path, body); !bytes.Equal(nb, body) {
+			req.Body = io.NopCloser(bytes.NewReader(nb))
+			req.ContentLength = int64(len(nb))
+			req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(nb)), nil }
 		}
 		return nil
 	}

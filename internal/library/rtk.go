@@ -484,9 +484,17 @@ type RTKView struct {
 	Upgrade string `json:"upgrade,omitempty"`
 	// Note is what an upgrade left to say: Homebrew's rtk behind rtk's
 	// own release
-	Note    string     `json:"note,omitempty"`
-	Agents  []RTKAgent `json:"agents"`
-	URL     string     `json:"url"`
+	Note string `json:"note,omitempty"`
+	// OffPath: rtk isn't on the PATH an agent started now gets, so its
+	// hooks, which run rtk by name, do nothing (Pi's says "rtk binary not
+	// found in PATH"). PathDir is where Put RTK on PATH makes it found — a
+	// link to it made in that folder (PathLink), or (Windows) that folder,
+	// rtk's own, added to the user's PATH; "" when magpie has nowhere
+	PathDir  string     `json:"pathDir,omitempty"`
+	PathLink bool       `json:"pathLink,omitempty"`
+	OffPath  bool       `json:"offPath,omitempty"`
+	Agents   []RTKAgent `json:"agents"`
+	URL      string     `json:"url"`
 	// Install is the command Install RTK runs, shown before it is clicked
 	Install string `json:"install,omitempty"`
 	// Restart are the agents a change reached, to be restarted to see it
@@ -499,13 +507,21 @@ var rtkMu sync.Mutex
 // rtkPath is rtk's, "" when it isn't installed; one installed since magpie
 // started may not be on its PATH yet, so where the installers put it is
 // looked in too (Homebrew's are on it from the start: proc.UserPath).
+// winget's is in its package folder, linked from WinGet\Links only when
+// winget could make the link. Found there, it may not be on the PATH the
+// agents get: see rtkReached.
 func rtkPath() string {
 	if p, err := exec.LookPath("rtk"); err == nil {
 		return p
 	}
 	name, dirs := "rtk", []string{filepath.Join(home(), ".local", "bin"), filepath.Join(home(), ".cargo", "bin")}
 	if runtime.GOOS == "windows" {
-		name, dirs = "rtk.exe", []string{filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "WinGet", "Links"), filepath.Join(home(), ".cargo", "bin")}
+		winget := filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "WinGet")
+		name, dirs = "rtk.exe", []string{filepath.Join(winget, "Links"), filepath.Join(home(), ".cargo", "bin")}
+		if os.Getenv("LOCALAPPDATA") != "" {
+			pkgs, _ := filepath.Glob(filepath.Join(winget, "Packages", "rtk-ai.rtk_*"))
+			dirs = append(dirs, pkgs...)
+		}
 	}
 	for _, d := range dirs {
 		if p := filepath.Join(d, name); exists(p) {
@@ -575,6 +591,10 @@ func ReadRTK() *RTKView {
 	}
 	if v.Path == "" {
 		return v
+	}
+	if !rtkReached() {
+		v.OffPath = true
+		v.PathDir, v.PathLink = rtkPathDir(v.Path)
 	}
 	if out, err := rtkRun(v.Path, "--version"); err == nil {
 		v.Version = strings.TrimSpace(strings.TrimPrefix(out, "rtk"))

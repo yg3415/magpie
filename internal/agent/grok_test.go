@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -186,5 +187,53 @@ func TestGrokCheckReportsTOMLParseErrors(t *testing.T) {
 	message := grok(home).Check()
 	if !strings.HasPrefix(message, path+": line 5, column 11:") || !strings.Contains(message, "array is incomplete") {
 		t.Fatalf("check did not report the parse location: %q", message)
+	}
+}
+
+// The models magpie serves on the account Grok Build is signed in to are
+// Grok's own a second time, beside its own: they fold into one row of the
+// picker (Fate on Discord: grokbuild 在登录态下会加载重复的模型), the
+// other providers' rows left as they are.
+func TestGrokFoldsItsOwnAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("GROK_HOME", filepath.Join(home, "grok"))
+	exe := provider.GrokExecutable
+	provider.GrokExecutable = func() string { return filepath.Join(home, "grok", "bin", "grok") }
+	t.Cleanup(func() { provider.GrokExecutable = exe })
+	provider.ForgetAccounts()
+	t.Cleanup(provider.ForgetAccounts)
+	os.MkdirAll(filepath.Join(home, "grok"), 0o755)
+	os.WriteFile(filepath.Join(home, "grok", "auth.json"), []byte(`{"x":{"key":"k","email":"me@x.ai"}}`), 0o600)
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro"}}); err != nil {
+		t.Fatal(err)
+	}
+	a := grok(home)
+	var same, others []string
+	for _, o := range a.Field("model").Options(a.Values()) {
+		if o.Same {
+			same = append(same, o.Value)
+		} else if strings.HasPrefix(o.Value, "magpie/") {
+			others = append(others, o.Value)
+		}
+	}
+	if len(same) == 0 {
+		t.Fatalf("nothing folded; magpie's rows: %v", others)
+	}
+	for _, v := range same {
+		if !strings.HasPrefix(v, "magpie/grok/") {
+			t.Errorf("folded %s, not on the Grok account", v)
+		}
+	}
+	for _, v := range others {
+		if strings.HasPrefix(v, "magpie/grok/") {
+			t.Errorf("%s on the Grok account not folded", v)
+		}
+	}
+	if !slices.Contains(others, "magpie/deepseek/pro") {
+		t.Errorf("DeepSeek's row: %v", others)
 	}
 }

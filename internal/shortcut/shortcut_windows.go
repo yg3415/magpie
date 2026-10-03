@@ -16,19 +16,32 @@ import (
 // own, no administrator needed
 const appPath = `Software\Microsoft\Windows\CurrentVersion\App Paths\magpie.exe`
 
-func ensure(exe string) error {
+func registerAppPath(exe string) {
 	if k, _, err := registry.CreateKey(registry.CURRENT_USER, appPath, registry.SET_VALUE); err == nil {
 		_ = k.SetStringValue("", exe)
 		_ = k.SetStringValue("Path", filepath.Dir(exe))
 		k.Close()
 	}
+}
+
+func registeredAppPath() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, appPath, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	k.Close()
+	return true
+}
+
+func startMenuLink() (string, error) {
 	dir, err := programs()
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = write(filepath.Join(dir, Name+".lnk"), exe)
-	return err
+	return filepath.Join(dir, Name+".lnk"), nil
 }
+
+func writeShortcut(lnk, exe string) (bool, error) { return write(lnk, exe) }
 
 // programs is the user's Start menu Programs folder.
 func programs() (string, error) {

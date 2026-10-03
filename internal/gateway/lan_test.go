@@ -1,13 +1,17 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -173,5 +177,113 @@ func TestInContainer(t *testing.T) {
 		if got := inContainer(mk(c.file, c.body)); got != c.want {
 			t.Errorf("%s %q: %v", c.file, c.body, got)
 		}
+	}
+}
+
+// Another computer lists the models with the key it was given whatever
+// else its client sends beside it: an empty or placeholder Authorization
+// with the key in x-api-key, a stale token there, "bearer" in lower case
+// (悠悠哥 on Discord: a client's model list from magpie shared on a NAS
+// failed, while from magpie on 127.0.0.1, which takes any token, it came).
+// The request comes as it would from the network: another address, the
+// NAS's address as its Host.
+func TestLANModelsWithKeyBesideAnotherToken(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	t.Setenv("MAGPIE_ADDR", "")
+	keys, secrets := newCaller(t, "PC")
+	key := secrets[0]
+	var who string
+	h := lanGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		who = access.Caller(r.Context()).KeyID
+		New().Handler().ServeHTTP(w, r)
+	}))
+	list := func(from, path string, hdr ...string) (int, string) {
+		who = ""
+		r := httptest.NewRequest("GET", "http://192.168.0.200:3425"+path, nil)
+		r.RemoteAddr = from
+		for i := 0; i+1 < len(hdr); i += 2 {
+			r.Header.Set(hdr[i], hdr[i+1])
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+	for _, hdr := range [][]string{
+		{"x-api-key", key, "anthropic-version", "2023-06-01"},
+		{"x-api-key", key, "Authorization", "Bearer " + key, "anthropic-version", "2023-06-01"},
+		{"x-api-key", key, "Authorization", "Bearer "},
+		{"x-api-key", key, "Authorization", "Bearer"},
+		{"x-api-key", key, "Authorization", "Bearer undefined"},
+		{"x-api-key", key, "Authorization", "Bearer magpie"},
+		{"Authorization", "bearer " + key},
+		{"Authorization", "Bearer magpie", "x-goog-api-key", key},
+	} {
+		for _, path := range []string{"/v1/models", "/models", "/v1/models?limit=1000"} {
+			c, b := list("192.168.0.9:50123", path, hdr...)
+			if c != 200 || !strings.Contains(b, `"id":"fake/m1"`) {
+				t.Fatalf("%s %q: %d %s", path, hdr, c, b)
+			}
+			if who != keys[0].ID {
+				t.Fatalf("%s %q: counted as %q, not the key", path, hdr, who)
+			}
+		}
+	}
+	// a key the gateway doesn't have is refused wherever it is sent
+	for _, hdr := range [][]string{
+		{"x-api-key", "sk-magpie-wrong", "Authorization", "Bearer magpie"},
+		{"Authorization", "Bearer "},
+		{"x-api-key", key + "x"},
+	} {
+		if c, _ := list("192.168.0.9:50123", "/v1/models", hdr...); c != http.StatusUnauthorized {
+			t.Fatalf("%q got %d", hdr, c)
+		}
+	}
+	// this computer is counted by the key beside a token too
+	if c, _ := list("127.0.0.1:50123", "/v1/models", "Authorization", "Bearer anything", "x-api-key", key); c != 200 || who != keys[0].ID {
+		t.Fatalf("loopback: %d, counted as %q", c, who)
+	}
+}
+
+// ZCode's custom provider asks no model list; its models are typed one a
+// line (悠悠哥 on Discord: from magpie on a NAS nothing filled it, while a
+// magpie on this computer writes its models into ZCode's own config).
+// /v1/models?format=text gives the ids one a line to paste there, opened
+// in a browser on another computer with the key as ?key=; without a key it
+// is refused as the list is.
+func TestLANModelsAsText(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	t.Setenv("MAGPIE_ADDR", "")
+	_, secrets := newCaller(t, "PC")
+	h := lanGuard(New().Handler())
+	get := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "http://192.168.0.200:3425"+path, nil)
+		r.RemoteAddr = "192.168.0.9:50123"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	w := get("/v1/models?format=text&key=" + secrets[0])
+	if w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("%d %s", w.Code, w.Header().Get("Content-Type"))
+	}
+	lines := strings.Split(strings.TrimSuffix(w.Body.String(), "\n"), "\n")
+	if !slices.Contains(lines, "fake/m1") || slices.ContainsFunc(lines, func(l string) bool { return l == "" || strings.ContainsAny(l, "{\" ") }) {
+		t.Fatalf("lines %q", lines)
+	}
+	// the JSON list's ids, in its order
+	j := get("/v1/models?key=" + secrets[0])
+	var list struct{ Data []struct{ ID string } }
+	if err := json.Unmarshal(j.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, m := range list.Data {
+		ids = append(ids, m.ID)
+	}
+	if !slices.Equal(ids, lines) {
+		t.Fatalf("text %q, json %q", lines, ids)
+	}
+	if w := get("/v1/models?format=text"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no key: %d", w.Code)
 	}
 }

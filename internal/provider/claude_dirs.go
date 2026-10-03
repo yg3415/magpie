@@ -150,26 +150,58 @@ func takeClaudeDir(l *savedLogin, c claudeCredentials) (bool, error) {
 
 // claudeStandIn is the saved account served in the place of Claude Code's
 // own while Claude Code is signed out — the user logged out of it, as it
-// tells them to when magpie's token is set beside a claude.ai sign-in. It
-// is the account seen last, which is the one Claude Code was signed in to
-// until then (rememberLogins sees that one every 30s), passing over one
-// whose saved sign-in is gone while another has one; "" when none is
-// saved. magpie keeps every account's sign-in itself, so a logout signs
-// none of them out of magpie: the stand-in runs Claude Code in a config
-// directory of its own, as the others on do.
+// tells them to when magpie's token is set beside a claude.ai sign-in.
+// magpie keeps the other accounts' sign-ins itself, each its own, so a
+// logout signs none of them out of magpie: the stand-in runs Claude Code
+// in a config directory of its own, as the others on do. Never the one
+// Claude Code was signed in to, whose sign-in its /logout revoked
+// (claudeLoggedOut, or still Held before rememberLogins next looks: it is
+// asked only while Claude Code is signed out); of the others, one with a
+// saved sign-in, on before off, then the one seen last; one whose saved
+// sign-in is gone only when no other has one; "" when there is none.
 func claudeStandIn(ls []savedLogin) string {
-	user, signedIn := "", false
+	user, best := "", -1
 	var seen time.Time
 	for _, l := range ls {
-		if l.Agent != "claude" {
+		if l.Agent != "claude" || l.Held || l.Lapsed == claudeLogoutLapse {
 			continue
 		}
-		_, ok := parseClaudeCredentials(l.Auth)
-		if user == "" || ok && !signedIn || ok == signedIn && l.Seen.After(seen) {
-			user, seen, signedIn = l.User, l.Seen, ok
+		rank := 0
+		if _, ok := parseClaudeCredentials(l.Auth); ok {
+			rank = 2
+			if l.On {
+				rank++
+			}
+		}
+		if rank > best || rank == best && l.Seen.After(seen) {
+			user, seen, best = l.User, l.Seen, rank
 		}
 	}
 	return user
+}
+
+// claudeLogoutLapse is why the account Claude Code was signed in to can't
+// be used once Claude Code logged out.
+const claudeLogoutLapse = "Claude Code's /logout signed it out (it revokes the sign-in it holds); sign in again"
+
+// claudeLoggedOut marks the account Claude Code held, now that it is
+// signed out, as lapsed: /logout revokes the refresh token Claude Code
+// holds (POST <token URL>/revoke, Claude Code 2.1.x's performLogout), and
+// magpie's copy of that account is the same sign-in, so it is gone too.
+// The accounts magpie keeps in config directories of their own are
+// sign-ins of their own and stay. It says whether ls changed.
+func claudeLoggedOut(ls []savedLogin) bool {
+	changed := false
+	for i := range ls {
+		if ls[i].Agent != "claude" || !ls[i].Held {
+			continue
+		}
+		ls[i].Held, changed = false, true
+		if _, ok := parseClaudeCredentials(ls[i].Auth); ok && ls[i].Lapsed == "" {
+			ls[i].Lapsed = claudeLogoutLapse
+		}
+	}
+	return changed
 }
 
 // claudeSignedOut is why a saved Claude account can't be used: its saved
@@ -199,4 +231,42 @@ func claudeStandInAccount() (Provider, bool) {
 	}
 	acct.token = func(context.Context) (string, error) { return claudeSavedDir(user) }
 	return claudeProvider(acct), true
+}
+
+// AgentsOwn says the account is the one the agent itself is signed in to,
+// run in the agent's own home with what it keeps there, not with a sign-in
+// magpie hands it. Which account that is moves with a switch (SwitchLogin):
+// a Claude Code started on it before goes on as whatever Claude Code is
+// signed in to by then, as it reads its keychain again every half minute.
+func (a *Account) AgentsOwn() bool { return a != nil && a.token == nil }
+
+// ClaudeCodeMovedOff says Claude Code itself is signed in to another
+// account than user now: what a Claude Code run in its own home says of
+// the account it is on is no longer user's. false when it can't be told.
+func ClaudeCodeMovedOff(user string) bool {
+	on := claudeCodeOn()
+	return on != "" && !sameClaudeUser(on, user)
+}
+
+// claudeCodeOn is the account Claude Code itself is signed in to now, as
+// magpie names it; "" when signed out or unknown.
+func claudeCodeOn() string {
+	l, ok := liveLogin("claude")
+	if !ok {
+		return ""
+	}
+	return l.User
+}
+
+// sameClaudeUser: a and b name one account, the one as magpie names a Team
+// or Enterprise seat ("me@x.com · Org") and the other as its email alone,
+// as `claude auth status` gives it.
+func sameClaudeUser(a, b string) bool {
+	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
+	if a == b {
+		return true
+	}
+	ea, _, _ := strings.Cut(a, " · ")
+	eb, _, _ := strings.Cut(b, " · ")
+	return (ea == b || eb == a) && ea != ""
 }

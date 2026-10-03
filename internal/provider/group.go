@@ -10,7 +10,9 @@ package provider
 // its own: a model more than one provider serves under the same name is a
 // group of those, derived each time and never stored until the user
 // changes one. Models of different names are only ever grouped by the
-// user: nothing here guesses which models are alike.
+// user — in a group of their own, or by saying in a provider's Names &
+// levels that one is the same as another (settings' ModelSameAs): nothing
+// here guesses which models are alike beyond how vendors spell one id.
 //
 // A group's member may be another group ("group/<id>"): to the group it is
 // one member, which a rule can put first like a model; its models are its
@@ -23,6 +25,9 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // GroupPrefix starts a group's id in the catalog: "group/<id>".
@@ -68,7 +73,7 @@ func (g Group) Picked() string {
 }
 
 // routes are the members requests to the group may go to now: a manual
-// group's pick alone, else every one.
+// group's pick alone, else every one not switched off.
 func (g Group) routes() []string {
 	if g.Routing == Manual {
 		if p := g.Picked(); p != "" {
@@ -76,8 +81,11 @@ func (g Group) routes() []string {
 		}
 		return nil
 	}
-	return g.Members
+	return slices.DeleteFunc(slices.Clone(g.Members), g.IsOff)
 }
+
+// IsOff is whether the group's member id is switched off.
+func (g Group) IsOff(id string) bool { return slices.Contains(g.Off, id) }
 
 // Live is the group as the gateway routes it: a manual group's rules
 // wait (the member picked is all it sends to), though they are kept.
@@ -95,6 +103,10 @@ type Group struct {
 	Members  []string `json:"members"`            // "provider/model[:effort]" or "group/<id>", in order (see MemberEffort)
 	Routing  string   `json:"routing,omitempty"`  // as Provider.Routing, over all the members' keys and accounts; or Manual
 	Affinity string   `json:"affinity,omitempty"` // as Provider.Affinity
+	// Off are the members switched off: kept where they are in the
+	// order, with their rules, but sent nothing until switched on again,
+	// so trying a group without one doesn't mean taking it out.
+	Off []string `json:"off,omitempty"`
 	// Pick is the member a Manual group sends every request to, as the
 	// user picked it on the group's card; "" is its first. It is kept
 	// while the group routes otherwise, for when it is manual again.
@@ -198,7 +210,7 @@ func groupsIn(entries []Entry) []Group {
 	if f.NoAutoGroups {
 		return out
 	}
-	for _, g := range autoGroups(entries) {
+	for _, g := range autoGroups(entries, settings.Load().ModelSameAs) {
 		if slices.ContainsFunc(out, func(o Group) bool { return o.ID == g.ID }) {
 			continue // the user changed it: theirs now
 		}
@@ -261,6 +273,27 @@ func SetAutoGroups(on bool) error {
 // vendor spells it: "auto-claude-opus-5-5" for claude-opus-5.5.
 func AutoGroupID(model string) string { return "auto-" + Slug(sameModel(model)) }
 
+// AutoGroupOf is the id of the group magpie finds for a provider's model:
+// AutoGroupID of the model the user said it is the same as (settings'
+// ModelSameAs), else of its own id.
+func AutoGroupOf(pid, model string) string {
+	return "auto-" + Slug(mergeKey(pid, model, settings.Load().ModelSameAs))
+}
+
+// MergeName is the name the groups magpie finds merge a model by, when
+// the user said nothing of it: its id as vendors agree on it (sameModel).
+func MergeName(model string) string { return sameModel(model) }
+
+// mergeKey is what the groups magpie finds merge pid's model by: the
+// model the user said it is the same as (same, by "<provider>/<model>"),
+// spelt as vendors agree on it, else its own id so spelt.
+func mergeKey(pid, model string, same map[string]string) string {
+	if v := same[pid+"/"+model]; v != "" {
+		return sameModel(v)
+	}
+	return sameModel(model)
+}
+
 // AutoStandIn is the model a request for a group magpie found goes to while
 // such groups are off (SetAutoGroups): its model, from the first provider
 // that serves it, as "provider/model". An agent set to the group, or a
@@ -276,7 +309,7 @@ func AutoStandIn(id string) (string, bool) {
 		return "", false
 	}
 	for _, e := range entries {
-		if AutoGroupID(e.Model) == gid {
+		if AutoGroupOf(e.Provider.ID, e.Model) == gid {
 			return e.ID, true
 		}
 	}
@@ -284,13 +317,14 @@ func AutoStandIn(id string) (string, bool) {
 }
 
 // autoGroups are the models more than one ready provider serves under the
-// same name — however each vendor spells it (see sameModel) — in the order
-// the providers were added.
-func autoGroups(entries []Entry) []Group {
+// same name — however each vendor spells it (see sameModel), or as the
+// user said one is the same as another (same: settings' ModelSameAs) — in
+// the order the providers were added.
+func autoGroups(entries []Entry, same map[string]string) []Group {
 	var order []string
 	by := map[string][]Entry{}
 	for _, e := range entries {
-		k := sameModel(e.Model)
+		k := mergeKey(e.Provider.ID, e.Model, same)
 		if !slices.ContainsFunc(by[k], func(o Entry) bool { return o.Provider.ID == e.Provider.ID }) {
 			if by[k] == nil {
 				order = append(order, k)
@@ -324,27 +358,51 @@ func autoGroups(entries []Entry) []Group {
 }
 
 // sameModel is a model's name as vendors agree on it: lowercase, without
-// the vendor's own prefix ("anthropic/claude-sonnet-5" is claude-sonnet-5),
-// with a version's dot as Anthropic writes it ("claude-opus-5.5" is
-// claude-opus-5-5) and without the snapshot date some add
-// ("claude-opus-5-5-20260801"). A variant after ":" (":batch") stays apart.
+// the vendor's own prefix ("anthropic/claude-sonnet-5" is claude-sonnet-5,
+// "accounts/fireworks/models/…" too), with a version's dot as Anthropic
+// writes it ("claude-opus-5.5" is claude-opus-5-5, and so is Fireworks'
+// "p" for the dot, "deepseek-v4p1"), "_" as "-", and without the snapshot
+// date some add: "claude-opus-5-5-20260801", Vertex's "…@20260801", and
+// Volcengine Ark's six digits ("deepseek-v4-1-flash-260910" is
+// deepseek-v4-1-flash, #583). Anything else stays: a variant after ":"
+// (":batch"), -flash, -thinking, and a four-digit release (qwen's -2507,
+// kimi-k2-0905) that is a model of its own.
 func sameModel(id string) string {
-	k := strings.ToLower(id)
+	k := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(id)), "_", "-")
 	if i := strings.LastIndex(k, "/"); i >= 0 {
 		k = k[i+1:]
 	}
 	b := []byte(k)
 	for i := 1; i+1 < len(b); i++ {
-		if b[i] == '.' && isDigit(b[i-1]) && isDigit(b[i+1]) {
+		if (b[i] == '.' || b[i] == 'p') && isDigit(b[i-1]) && isDigit(b[i+1]) {
 			b[i] = '-'
 		}
 	}
 	k = string(b)
-	if i := strings.LastIndex(k, "-"); i > 0 && len(k)-i-1 == 8 && strings.HasPrefix(k[i+1:], "20") && strings.Trim(k[i+1:], "0123456789") == "" {
+	if i := strings.LastIndexAny(k, "-@"); i > 0 && snapshotDate(k[i+1:]) {
 		k = k[:i]
 	}
 	return k
 }
+
+// snapshotDate is whether s is the date a vendor dates a snapshot of a
+// model by: YYYYMMDD from 2000 on, or Ark's YYMMDD from 2023 on, with a
+// month and a day that are one.
+func snapshotDate(s string) bool {
+	if strings.Trim(s, "0123456789") != "" {
+		return false
+	}
+	switch {
+	case len(s) == 8 && strings.HasPrefix(s, "20"):
+		return true
+	case len(s) == 6:
+		yy, mm, dd := atoi2(s[0:2]), atoi2(s[2:4]), atoi2(s[4:6])
+		return yy >= 23 && yy <= 39 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31
+	}
+	return false
+}
+
+func atoi2(s string) int { return int(s[0]-'0')*10 + int(s[1]-'0') }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
@@ -447,7 +505,8 @@ func membersIn(entries []Entry, all []Group, g Group) []Member {
 // as the user named it, answering for its first member when an agent asks
 // what the model can do, and offering only the reasoning levels every
 // member has — but for those fixed at an effort of their own, which take
-// whatever the agent asks. With every member fixed, the group offers the
+// whatever the agent asks, and those whose levels nothing magpie reads
+// knows (levelsUnknown), which are sent it as asked. With every member fixed, the group offers the
 // levels they are fixed at, so that an agent still asks it to reason.
 // A group that names its own levels (Group.Levels) offers those, and so
 // does a group in it for its models.
@@ -477,9 +536,11 @@ func groupEntries(entries []Entry) []Entry {
 			var efforts []string
 			images, thinks, ctx, output := false, false, 0, 0
 			var imageInput *bool
+			unknown := false
 			for _, x := range entries {
 				if x.Provider.ID == m.Provider.ID && x.Model == m.Model {
 					efforts, images, thinks, ctx, output, imageInput = x.Efforts, x.Images, x.Reasoning, x.Context, x.Output, x.ImageInput
+					unknown = levelsUnknown(x)
 				}
 			}
 			e.Reasoning = e.Reasoning && thinks
@@ -503,6 +564,14 @@ func groupEntries(entries []Entry) []Entry {
 				if !slices.Contains(fixed, m.Effort) {
 					fixed = append(fixed, m.Effort)
 				}
+				continue
+			} else if unknown {
+				// nothing magpie reads says which levels it takes, or that
+				// it takes none: the gateway sends it the effort asked as
+				// it is (fitEffort), so it doesn't take the others' away —
+				// a Token Plan's deepseek-v4-pro-202606 beside a TokenHub
+				// deepseek-v4-pro left the group none, and Pi only off
+				// (#597)
 				continue
 			}
 			ultra = ultra || slices.Contains(efforts, "ultra")
@@ -534,6 +603,23 @@ func groupEntries(entries []Entry) []Entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+// levelsUnknown reports whether nothing magpie reads says which reasoning
+// levels the model of x takes, or that it takes none: it has none in the
+// catalog, no account's list gives it, its vendor and its maker don't list
+// it, and models.dev lists no model of its id at all.
+func levelsUnknown(x Entry) bool {
+	if len(x.Efforts) > 0 || x.Provider.Account != nil && x.Provider.Account.models != nil {
+		return false
+	}
+	if _, ok := catalog.ListedBy(x.Provider.Catalogs(), x.Model); ok {
+		return false
+	}
+	if _, ok := catalog.ListedBy(makerCatalogs(), x.Model); ok {
+		return false
+	}
+	return !catalog.Knows(x.Model)
 }
 
 // SaveGroup adds or replaces a group of the user's. Changing one magpie
@@ -569,6 +655,16 @@ func SaveGroup(g Group) error {
 		g.Members[i] = cleanMember(entries, m)
 	}
 	g.Members = cleanList(g.Members)
+	var off []string
+	for _, m := range cleanList(g.Off) {
+		if m = cleanMember(entries, m); slices.Contains(g.Members, m) && !slices.Contains(off, m) {
+			off = append(off, m)
+		}
+	}
+	g.Off = off
+	if g.Routing != Manual && len(g.Off) == len(g.Members) {
+		return fmt.Errorf("every model in %s is switched off: switch one on, or it has nothing to send to", g.Name)
+	}
 	for i := range g.Rules {
 		g.Rules[i].Use = cleanMember(entries, strings.TrimSpace(g.Rules[i].Use))
 	}
@@ -580,7 +676,7 @@ func SaveGroup(g Group) error {
 			return fmt.Errorf("%s decides a group's model and effort; it holds no conversation, so it can only be the group's classifier", m)
 		}
 	}
-	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Manual {
+	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Manual {
 		g.Routing = ""
 	}
 	if !slices.Contains(Affinities, g.Affinity) {
@@ -765,7 +861,7 @@ func DeleteGroup(id string) error {
 		}
 		return false
 	})
-	if slices.ContainsFunc(autoGroups(providerEntries()), func(g Group) bool { return g.ID == id }) {
+	if slices.ContainsFunc(autoGroups(providerEntries(), settings.Load().ModelSameAs), func(g Group) bool { return g.ID == id }) {
 		f.Groups = append(f.Groups, Group{ID: id, Hidden: true})
 		found = true
 	}
@@ -824,7 +920,7 @@ func RenameGroup(from, to string) error {
 		slices.ContainsFunc(f.Groups, func(o Group) bool { return o.ID == to }) {
 		return fmt.Errorf("there is a group %q already", to)
 	}
-	found := slices.ContainsFunc(autoGroups(providerEntries()), func(o Group) bool { return o.ID == from })
+	found := slices.ContainsFunc(autoGroups(providerEntries(), settings.Load().ModelSameAs), func(o Group) bool { return o.ID == from })
 	g.ID, g.Auto, g.Hidden = to, false, false
 	f.Groups = slices.DeleteFunc(f.Groups, func(o Group) bool { return o.ID == from })
 	if found {
@@ -845,6 +941,11 @@ func RenameGroup(from, to string) error {
 		}
 		if f.Groups[i].Pick == old {
 			f.Groups[i].Pick = now
+		}
+		for j, m := range f.Groups[i].Off {
+			if m == old {
+				f.Groups[i].Off[j] = now
+			}
 		}
 		if f.Groups[i].Classifier == old {
 			f.Groups[i].Classifier = now

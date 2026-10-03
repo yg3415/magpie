@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -154,7 +155,7 @@ func claudeDesktop(home string) *Agent {
 			return wiringOff("Claude Desktop", p.prof, func(k string) (string, bool) { return edit.GetJSON(p.prof, k) },
 				"inferenceGatewayBaseUrl", gateway.URL(), "inferenceGatewayApiKey", gateway.TokenFor("claude-desktop"))
 		},
-		Fields: []Field{{
+		Fields: append([]Field{{
 			Key: "provider", Label: "provider",
 			Get: func() string {
 				if desktopWired(p) {
@@ -179,8 +180,37 @@ func claudeDesktop(home string) *Agent {
 				return []Option{{Value: magpieID, Label: "magpie", Icon: "magpie",
 					Note: "Desktop's third-party gateway: Code and Cowork on magpie's models, no Anthropic sign-in (restart Desktop)"}}
 			},
-		}},
+		}}, desktopTierFields(p)...),
 	}
+}
+
+// desktopTierFields pick the model each of Claude Code's tiers runs on in
+// Desktop's Code tab, its subagents' sonnet, haiku or opus among them
+// (gateway.DesktopTiers). Unset, a Claude model magpie serves stands in for
+// its own tier, else the chat's model does. Desktop reads them from the
+// gateway's /v1/models when it starts.
+func desktopTierFields(p desktopPaths) []Field {
+	var fields []Field
+	for _, tier := range gateway.DesktopTierNames {
+		fields = append(fields, Field{
+			Key: tier, Label: tier, Quiet: true,
+			Get: func() string { return gateway.DesktopTiers()[tier] },
+			Set: func(v string) error {
+				v = gateway.DesktopCatalogID(v)
+				if v != "" && !isMagpie(v) {
+					return fmt.Errorf("%s: %q is not a model magpie serves", tier, v)
+				}
+				return gateway.SetDesktopTier(tier, v)
+			},
+			Options: func(map[string]string) []Option {
+				if !desktopWired(p) {
+					return nil
+				}
+				return viaMagpie("claude-desktop", "")
+			},
+		})
+	}
+	return fields
 }
 
 // desktopWired: _meta.json lists magpie's profile.

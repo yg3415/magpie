@@ -96,7 +96,7 @@ func TestSearchCallIDsUntouched(t *testing.T) {
 		`{"model":"gpt-5.5","input":[{"type":"function_call","id":"fc_1","call_id":"c","name":"shell","arguments":"{}"}]}`,
 		`{"model":"gpt-5.5",  "input":[{"type":"tool_search_call","id":"tsc_1","call_id":"s","arguments":{}},{"type":"tool_search_call","call_id":"t","arguments":{}}]}`,
 	} {
-		if got := searchCallIDs([]byte(b)); string(got) != b {
+		if got := callItemIDs([]byte(b)); string(got) != b {
 			t.Errorf("%s -> %s", b, got)
 		}
 	}

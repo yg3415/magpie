@@ -12,11 +12,14 @@ import (
 // the Mac's hidden title bar does; Windows' grey bar sat above the page as
 // a strip of its own, and stayed light over a page set to dark.
 func (h *host) TintTitleBar(c [4]uint8, dark bool) bool {
-	w := h.main
-	if w == nil || !w32.SupportsCustomThemes() {
+	if !w32.SupportsCustomThemes() {
 		return false
 	}
 	application.InvokeSync(func() {
+		w := h.main
+		if w == nil { // let go (lightweight mode); its page tints it when made again
+			return
+		}
 		hwnd := uintptr(w.NativeWindow())
 		if hwnd == 0 {
 			return

@@ -72,6 +72,11 @@ func Rename(from, to string) error {
 			f.Providers[j].Fallback[k] = renamedRef(m, from, to)
 		}
 	}
+	for j, id := range f.Order {
+		if id == from {
+			f.Order[j] = to
+		}
+	}
 	for j := range f.Groups {
 		g := &f.Groups[j]
 		for k, m := range g.Members {
@@ -82,6 +87,9 @@ func Rename(from, to string) error {
 		}
 		for k, m := range g.Fast {
 			g.Fast[k] = renamedRef(m, from, to)
+		}
+		for k, m := range g.Off {
+			g.Off[k] = renamedRef(m, from, to)
 		}
 		g.Classifier = renamedRef(g.Classifier, from, to)
 		g.Pick = renamedRef(g.Pick, from, to)

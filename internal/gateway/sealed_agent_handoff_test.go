@@ -82,3 +82,54 @@ func TestCodexSealedAgentHandoffNativePassthrough(t *testing.T) {
 		t.Fatalf("native request: status=%d forwarded=%v response=%s", code, len(got) > 0, response)
 	}
 }
+
+// A Codex subagent on a routing group whose lead a ChatGPT account of the
+// group answered (Koohoko, #619): the task the lead's spawn_agent sealed
+// goes to the group's ChatGPT account that answered the lead, not to the
+// member routing puts first, which can't read it, nor is it turned away.
+func TestCodexSealedAgentHandoffGoesToGroupsChatGPTAccount(t *testing.T) {
+	var tried []string
+	var got []byte
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		tried = append(tried, r.Header.Get("chatgpt-account-id"))
+		io.WriteString(w, sse(`data: {"type":"response.output_text.delta","delta":"on it"}`,
+			`data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`))
+	})
+	codexSignedIn(t, "spare@example.com")
+	sticks.Lock()
+	sticks.m = map[string]stick{}
+	sticks.Unlock()
+	grok := &scripted{replies: []reply{{200, "text/event-stream", grokAnswer}}}
+	scriptedOn(t, "xai", provider.Chat, grok)
+	refusalGroup(t, "xai/m", "codex/gpt-5.5")
+	s := New()
+	ask := func(session, parent, pin, input string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", CodexPath+"/responses", strings.NewReader(`{"model":"group/g","stream":true,"input":[`+input+`]}`))
+		req.Header.Set("Authorization", "Bearer chatgpt-token")
+		req.Header.Set("chatgpt-account-id", "acct-1")
+		req.Header.Set("session_id", session)
+		if parent != "" {
+			req.Header.Set("x-codex-parent-thread-id", parent)
+		}
+		if pin != "" {
+			req.Header.Set(AccountHeader, pin)
+		}
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	// the lead, answered by the spare account
+	lead := `{"type":"message","role":"user","content":[{"type":"input_text","text":"spawn a worker"}]}`
+	if rec := ask("lead-1", "", "spare@example.com", lead); rec.Code != 200 || strings.Join(tried, ",") != "acct-2" {
+		t.Fatalf("lead: %d %s (tried %v)", rec.Code, rec.Body.String(), tried)
+	}
+	tried = nil
+	rec := ask("worker-1", "lead-1", "", sealedHandoff)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "on it") {
+		t.Fatalf("subagent: %d %s", rec.Code, rec.Body.String())
+	}
+	if grok.n != 0 || strings.Join(tried, ",") != "acct-2" || !strings.Contains(string(got), "gAAAAATest_ciphertext==") {
+		t.Fatalf("sealed task went to grok %d, accounts %v, forwarded sealed=%v", grok.n, tried, strings.Contains(string(got), "gAAAAATest_ciphertext=="))
+	}
+}

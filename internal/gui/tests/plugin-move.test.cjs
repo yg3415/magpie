@@ -71,16 +71,16 @@ function serve(lang, posts) {
 }
 
 const L = {
-  en: { runs: "Runs on", line: "Zed can run on community plugins, with the same accounts.", look: "Take a look",
+  en: { runs: "Runs on", line: "Zed's built-in subscription is deprecated", look: "Review the move",
     move: "Move to the plugin", busy: "Installing the plugin and checking each account…", again: "Try again", back: "Use the built-in again",
     failed: "It stays built-in: magpie couldn't reach npm to install the plugin. Check the network or proxy, then try again.",
     onPlugin: "The community Zed plugin", builtin: "magpie's built-in · or the community Zed plugin", done: "Zed now runs on its plugin — 2 accounts, 1 model.",
-    subs: "Subscriptions", card: "Move my 2 Zed accounts", own: "Zed itself stays signed in as it is." },
-  zh: { runs: "运行方式", line: "Zed 可以改由社区插件运行，账号不变。", look: "查看",
+    subs: "Subscriptions", card: "Move", own: "Zed itself stays signed in as it is." },
+  zh: { runs: "运行方式", line: "Zed 的内置订阅已弃用", look: "查看迁移",
     move: "迁移到插件", busy: "正在安装插件并逐个检查账号…", again: "重试", back: "改回内置",
     failed: "仍使用内置：无法连接 npm 安装插件，请检查网络或代理后重试。",
     onPlugin: "社区 Zed 插件", builtin: "magpie 内置 · 也可改用社区 Zed 插件", done: "Zed 现在由插件运行——2 个账号，1 个模型。",
-    subs: "订阅", card: "迁移我的 2 个 Zed 账号", own: "Zed 本身的登录保持不变。" },
+    subs: "订阅", card: "迁移", own: "Zed 本身的登录保持不变。" },
 };
 
 const launch = (engine) => engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" });
@@ -98,10 +98,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
 
-      // the quiet line over the list opens Zed's editor
+      // the deprecation notice over the list opens Zed's editor
       const line = page.locator("#movable");
       await line.locator("button", { hasText: w.look }).waitFor();
-      assert.ok((await line.innerText()).includes(w.line), "no line saying Zed can move");
+      assert.ok((await line.innerText()).includes(w.line), "no notice saying Zed is deprecated");
       await line.locator("button", { hasText: w.look }).click();
 
       const ed = page.locator("#modal .editor");

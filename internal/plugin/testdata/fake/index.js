@@ -123,6 +123,10 @@ export const FakePlugin = async ({ client }) => ({
       }
       // fake-1 costs the plan nothing, as a WorkBuddy model of x0.00 credits
       p.models["fake-1"].free = true
+      // fake-claude's credits are a number, discounted; fake-gemini's as
+      // WorkBuddy's picker writes them
+      if (p.models["fake-claude"]) Object.assign(p.models["fake-claude"], { rate: 0.5, rateWas: 1 })
+      if (p.models["fake-gemini"]) p.models["fake-gemini"].rate = "x0.03"
       if (auth?.key === "few") return { "fake-1": p.models["fake-1"] }
       // $FAKE_MODELS: the vendor's list, whose answer names one more model
       if (process.env.FAKE_MODELS && auth) {

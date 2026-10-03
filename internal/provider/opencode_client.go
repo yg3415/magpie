@@ -15,6 +15,10 @@ import (
 // "OpenCode 1.18.0 or newer is required to use the free tier").
 const OpenCodeVersion = "1.18.34"
 
+// OpenCodeAnonymousKey is the key OpenCode asks Zen with when no one is
+// signed in to it, which Zen's free models answer.
+const OpenCodeAnonymousKey = "public"
+
 // OpenCodeClient makes a request to OpenCode's gateway (Zen or Go) carry
 // what OpenCode itself sends there (packages/opencode/src/session/llm/
 // request.ts, for a provider whose id starts with "opencode"): its

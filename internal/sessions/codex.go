@@ -49,9 +49,12 @@ func (u cxUsage) raw() Tokens {
 	return Tokens{Input: u.Input, Output: u.Output, CacheRead: u.Cached, CacheWrite: u.CacheWrite}
 }
 
-// spent is raw usage with the cache taken out of the input.
+// spent is raw usage with the cache taken out of the input: Codex's
+// input_tokens is the whole prompt, what was read from the cache and what
+// was written to it (cache_write_input_tokens, which a newer Codex keeps)
+// among it, so neither is counted twice (#589).
 func spent(t Tokens) Tokens {
-	t.Input -= t.CacheRead
+	t.Input -= t.CacheRead + t.CacheWrite
 	if t.Input < 0 {
 		t.Input = 0
 	}

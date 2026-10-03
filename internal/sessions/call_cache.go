@@ -20,7 +20,8 @@ import (
 
 // v3 persists Codex cumulative counters explicitly; v2 shards can contain
 // inflated deltas after a reload, so rebuild their derived rows from source.
-const callCacheVersion = "calls-v3"
+// v4: a Codex call's input no longer holds what it wrote to the cache (#589).
+const callCacheVersion = "calls-v4"
 const maxKeptCalls = 131072
 const maxKeptFiles = 64
 
@@ -47,7 +48,8 @@ func resetCalls() {
 func pruneCalls(files []file) {
 	root := callCacheDir()
 	callsMu.Lock()
-	if callRoot != root {
+	moved := callRoot != root
+	if moved {
 		callGeneration++
 		callCache, callOrder, callRoot = map[string]*callFile{}, nil, root
 		callCounts = map[string]int{}
@@ -73,6 +75,15 @@ func pruneCalls(files []file) {
 		}
 	}
 	callsMu.Unlock()
+	if moved {
+		// an older version's shards are never read again
+		olds, _ := filepath.Glob(filepath.Join(filepath.Dir(root), "calls-v*"))
+		for _, old := range olds {
+			if old != root {
+				_ = os.RemoveAll(old)
+			}
+		}
+	}
 	// IO never holds the metadata lock. A grace period protects live writers.
 	entries, _ := os.ReadDir(root)
 	for _, e := range entries {

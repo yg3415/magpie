@@ -256,3 +256,50 @@ func TestGrokExecutableFinds(t *testing.T) {
 		t.Fatalf("GROK_BIN_DIR: %q", p)
 	}
 }
+
+// A function whose parameters are an anyOf (or oneOf) at the root, as
+// Codex's codex_app automation_update, goes to Grok as an object: Grok's
+// backend turns the request away otherwise ("[invalid_client_tool_schema]
+// ... tool parameter root must be an object type", Fate on Discord). The
+// object branches' properties are merged, $refs to $defs read, a field all
+// of them require stays required, the non-object branches go. One that is
+// an object already is left as it is.
+func TestGrokBodyObjectRoot(t *testing.T) {
+	in := []byte(`{"tools":[
+		{"type":"function","name":"mcp__codex_app__automation_update","parameters":{"anyOf":[
+			{"type":"object","properties":{"id":{"type":"string"},"prompt":{"type":"string"}},"required":["id","prompt"]},
+			{"$ref":"#/$defs/pause"},
+			{"type":"null"}],"$defs":{"pause":{"type":"object","properties":{"id":{"type":"string"},"paused":{"type":"boolean"}},"required":["id"]}}}},
+		{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"pick","parameters":{"oneOf":[{"type":"object","properties":{"a":{"type":"string"}}}]}}]},
+		{"type":"function","name":"plain","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}]}`)
+	var got struct {
+		Tools []struct {
+			Name       string         `json:"name"`
+			Parameters map[string]any `json:"parameters"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(grokBody(in), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tools) != 3 {
+		t.Fatalf("%+v", got)
+	}
+	for _, tl := range got.Tools {
+		p := tl.Parameters
+		if p["type"] != "object" || p["anyOf"] != nil || p["oneOf"] != nil {
+			t.Fatalf("%s: %v", tl.Name, p)
+		}
+	}
+	p := got.Tools[0].Parameters
+	props, _ := p["properties"].(map[string]any)
+	if len(props) != 3 || props["paused"] == nil || props["prompt"] == nil || fmt.Sprint(p["required"]) != "[id]" {
+		t.Fatalf("merged %v", p)
+	}
+	if got.Tools[1].Name != "codex_app__pick" || got.Tools[1].Parameters["properties"].(map[string]any)["a"] == nil {
+		t.Fatalf("namespaced %+v", got.Tools[1])
+	}
+	same := []byte(`{"tools":[{"type":"function","name":"x","parameters":{"type":"object","properties":{}}}]}`)
+	if string(grokBody(same)) != string(same) {
+		t.Fatal("an object root was changed")
+	}
+}

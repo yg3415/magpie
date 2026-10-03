@@ -223,6 +223,35 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(ctl.posts, 0, "watching a check already under way does not start another");
         assert.deepEqual(errors, []);
       });
+
+      // freecss on Discord: "0.1.628 已下载 · couldn't move
+      // magpie-windows-amd64.exe aside to put the new version in: rename C:\Us…"
+      // — the reason was cut off. It is read in full, and the release page is
+      // a click away.
+      await t.test(lang + ": an install that failed says why in full", async () => {
+        const error = "couldn't move magpie-windows-amd64.exe aside to put the new version in: The process cannot access the file because it is being used by another process; another program has it open (often an antivirus or OneDrive): let magpie through it and restart to update again, or download the new version and put it in place of this one";
+        const url = "https://github.com/yetone/magpie-releases/releases/tag/v0.1.628";
+        const ctl = fresh({ update: { state: "ready", current: "0.1.627", latest: "0.1.628", error, url } });
+        const { page, errors } = await open(lang, ctl);
+        const opened = [];
+        await page.route("**/api/open", async (route) => { opened.push(route.request().postDataJSON()); await route.fulfill({ json: {} }); });
+        const row = rowOf(page, w.version);
+        const sub = row.locator(".sub");
+        await page.waitForFunction((e) => document.querySelector("#about .row.pref .sub")?.textContent.includes(e), error);
+        assert.equal(await sub.getAttribute("title"), error);
+        const cut = await sub.evaluate((s) => s.scrollWidth > s.clientWidth + 1);
+        assert.equal(cut, false, "the reason must not be cut off");
+        const download = row.locator("button", { hasText: lang === "zh" ? "下载" : "Download" });
+        await download.click();
+        assert.deepEqual(opened, [{ url }]);
+
+        // a later state is one line again
+        ctl.update = { state: "latest", current: "0.1.628" };
+        await page.evaluate(() => { void renderUpdate(document.querySelector("#about .row.pref")); });
+        await page.waitForFunction((latest) => document.querySelector("#about .row.pref .sub")?.textContent.trim() === latest, w.latest);
+        assert.equal(await sub.evaluate((s) => s.classList.contains("wraps")), false);
+        assert.deepEqual(errors, []);
+      });
     }
   });
 }

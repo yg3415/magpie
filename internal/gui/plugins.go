@@ -274,6 +274,14 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, map[string]string{"dir": dir})
 	})
+	// Check for updates: npm asked now for each plugin's newest version,
+	// with the list as it then stands; nothing installed
+	mux.HandleFunc("POST /api/plugins/check", func(rw http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		c := plugin.CheckNow(ctx)
+		writeJSON(rw, map[string]any{"at": c.At, "plugins": c.Plugins, "state": pluginsState(ctx, w)})
+	})
 	// add, remove, update, turn on or off: each answers with the list
 	mux.HandleFunc("POST /api/plugins/{op}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -306,6 +314,12 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		if err != nil {
 			fail(rw, err)
 			return
+		}
+		// a deprecated built-in the plugin now serves is the plugin's, so
+		// it isn't listed twice; one with accounts moves in the background
+		// loop (provider.KeepRetiringMoved)
+		if op := r.PathValue("op"); op == "add" || op == "update" || op == "upgrade" {
+			provider.HandOver(ctx, false)
 		}
 		writeJSON(rw, pluginsState(ctx, w))
 	})

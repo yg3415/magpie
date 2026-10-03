@@ -262,7 +262,7 @@ func affine(scope, mode string, rotate bool, in http.Header, from provider.Proto
 		a.Why = "gone"
 	case pl.order[at].Rest != nil:
 		a.Why = "resting"
-	case pl.order[at].Known && pl.order[at].Used >= usedShare:
+	case pl.order[at].Known && pl.order[at].Used >= provider.SpentShareOf(cs[at].p.Routing):
 		a.Why = "spent"
 	case mode == provider.AffinitySession:
 		a.Why = "session"

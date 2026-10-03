@@ -101,7 +101,7 @@ func AutoUseCodexReset(ctx context.Context, user string) (ResetOutcome, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		_, windows, resets, err := codexWindows(ViaLogin(ctx, "codex", who), tok, accountID)
+		_, windows, resets, _, err := codexWindows(ViaLogin(ctx, "codex", who), tok, accountID)
 		if err != nil {
 			return nil, false, err
 		}

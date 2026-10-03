@@ -2,4 +2,10 @@
 
 package shortcut
 
-func ensure(string) error { return nil }
+func startMenuLink() (string, error) { return "", errNoStartMenu }
+
+func writeShortcut(string, string) (bool, error) { return false, nil }
+
+func registerAppPath(string) {}
+
+func registeredAppPath() bool { return false }

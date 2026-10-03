@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +151,37 @@ func TestMoveToPlugin(t *testing.T) {
 	if len(fakeSaved(t)) != 1 || plugin.SignedIn("fakeco") {
 		t.Fatal("a move short of a model moved")
 	}
+	// one the mover says the plugin serves though it doesn't list it (a
+	// Devin variant) isn't named, nor is a name twice
+	movers["fakeco"].served = func(m string, listed []string) bool { return m == "fake-1-high" && slices.Contains(listed, "fake-1") }
+	reset(fakeLogin("a@fake", "r-a", false, true))
+	inUse = []string{"fake-1", "fake-1-high", "gone-model", "gone-model"}
+	if err := Move(ctx, "fakeco"); err == nil || strings.Contains(err.Error(), "fake-1-high") || strings.Count(err.Error(), "gone-model") != 1 {
+		t.Fatalf("Move with a served variant and a model the plugin lacks = %v", err)
+	}
+	movers["fakeco"].served = nil
+	// one the built-in never served on the account either (a ZCode Start
+	// Plan account's GLM-5.3) is no loss and isn't named; one it did is,
+	// with the account and its plan
+	movers["fakeco"].builtin = func(_ context.Context, a Moving, m string) bool { return a.User != "a@fake" || m != "never-model" }
+	reset(func() savedLogin { l := fakeLogin("a@fake", "r-a", false, true); l.Plan = "Fake Start"; return l }())
+	inUse = []string{"fake-1", "never-model"}
+	if err := Move(ctx, "fakeco"); err != nil {
+		t.Fatalf("Move with a model the built-in didn't serve either = %v", err)
+	}
+	if err := MoveBack(ctx, "fakeco"); err != nil {
+		t.Fatal(err)
+	}
+	reset(func() savedLogin { l := fakeLogin("a@fake", "r-a", false, true); l.Plan = "Fake Start"; return l }())
+	inUse = []string{"fake-1", "never-model", "gone-model"}
+	err = Move(ctx, "fakeco")
+	if err == nil || strings.Contains(err.Error(), "never-model") || !strings.Contains(err.Error(), "gone-model for a@fake (Fake Start)") {
+		t.Fatalf("Move with a model the built-in served on the account = %v", err)
+	}
+	if w := WhyOf(err); w == nil || w.Code != "unserved" || w.Args["user"] != "a@fake (Fake Start)" || w.Args["models"] != "gone-model" {
+		t.Fatalf("its why: %+v", w)
+	}
+	movers["fakeco"].builtin = nil
 	inUse = []string{"fake-1", "fake-claude"}
 
 	// an account signed in through the plugin already gets back what it had

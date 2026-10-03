@@ -82,11 +82,26 @@ func newS3(c Config) (*s3, error) {
 // where names the object in messages: bucket/key at the endpoint's host.
 func (s *s3) where() string { return s.bucket + "/" + s.key + " at " + s.endpoint.Host }
 
-func (s *s3) objectURL() *url.URL {
+func (s *s3) objectURL() *url.URL { return s.urlOf(s.key) }
+
+// urlOf is the object key's address; bucketURL the bucket's, for a listing.
+func (s *s3) urlOf(key string) *url.URL {
 	u := *s.endpoint
-	p := u.Path + "/" + s.key
+	p := u.Path + "/" + key
 	if s.pathStyle {
-		p = u.Path + "/" + s.bucket + "/" + s.key
+		p = u.Path + "/" + s.bucket + "/" + key
+	} else {
+		u.Host = s.bucket + "." + u.Host
+	}
+	u.Path, u.RawPath = p, awsEscape(p, true)
+	return &u
+}
+
+func (s *s3) bucketURL() *url.URL {
+	u := *s.endpoint
+	p := u.Path + "/"
+	if s.pathStyle {
+		p = u.Path + "/" + s.bucket
 	} else {
 		u.Host = s.bucket + "." + u.Host
 	}
@@ -95,11 +110,15 @@ func (s *s3) objectURL() *url.URL {
 }
 
 func (s *s3) send(ctx context.Context, method string, body []byte, h map[string]string) (*http.Response, error) {
+	return s.sendTo(ctx, method, s.objectURL(), body, h)
+}
+
+func (s *s3) sendTo(ctx context.Context, method string, u *url.URL, body []byte, h map[string]string) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, s.objectURL().String(), r)
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), r)
 	if err != nil {
 		return nil, err
 	}
@@ -115,16 +134,18 @@ func (s *s3) send(ctx context.Context, method string, body []byte, h map[string]
 // s3Error is what an S3 server says went wrong: its XML body's code and
 // message, and the region it names for a bucket that is elsewhere.
 type s3Error struct {
-	Status  int    `xml:"-"`
-	Code    string `xml:"Code"`
-	Message string `xml:"Message"`
-	Region  string `xml:"Region"`
+	Status  int           `xml:"-"`
+	Code    string        `xml:"Code"`
+	Message string        `xml:"Message"`
+	Region  string        `xml:"Region"`
+	After   time.Duration `xml:"-"` // Retry-After's wait, when it said one
 }
 
 func readError(res *http.Response) s3Error {
 	var e s3Error
 	xml.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&e)
 	e.Status = res.StatusCode
+	e.After = retryAfter(res.Header.Get("Retry-After"))
 	if e.Region == "" {
 		e.Region = res.Header.Get("X-Amz-Bucket-Region")
 	}
@@ -143,6 +164,9 @@ func (e s3Error) String() string {
 // meant.
 func (s *s3) explain(op string, e s3Error) error {
 	switch {
+	// 503 SlowDown: AWS's, and others', for too many requests
+	case e.Status == http.StatusTooManyRequests || e.Status == http.StatusServiceUnavailable || e.Code == "SlowDown":
+		return &rateLimited{kind: "S3", status: e.Status, after: e.After}
 	case e.Code == "InvalidAccessKeyId" || e.Code == "SignatureDoesNotMatch" || e.Status == http.StatusUnauthorized:
 		return fmt.Errorf("the S3 server refused the access key ID or secret (%s)", e)
 	case e.Code == "RequestTimeTooSkewed":
@@ -168,25 +192,31 @@ func (s *s3) explain(op string, e s3Error) error {
 	return fmt.Errorf("%s %s on the S3 server: %s", verb, s.where(), e)
 }
 
-// get reads the backup; nil data and no error when there is none yet.
-func (s *s3) get(ctx context.Context) (data []byte, etag string, err error) {
-	res, err := s.send(ctx, http.MethodGet, nil, nil)
+// get reads the backup; nil data and no error when there is none yet, and
+// errNotModified when it is still have: the If-None-Match is signed with
+// the rest.
+func (s *s3) get(ctx context.Context, have version) (data []byte, v version, err error) {
+	cond := have.conditions()
+	res, err := s.send(ctx, http.MethodGet, nil, cond)
 	if err != nil {
-		return nil, "", err
+		return nil, version{}, err
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotModified && cond != nil {
+		return nil, have, errNotModified
+	}
 	if res.StatusCode != http.StatusOK {
 		e := readError(res)
 		if e.Status == http.StatusNotFound && e.Code != "NoSuchBucket" {
-			return nil, "", nil
+			return nil, version{}, nil
 		}
-		return nil, "", s.explain("read", e)
+		return nil, version{}, s.explain("read", e)
 	}
 	data, err = io.ReadAll(io.LimitReader(res.Body, 64<<20))
 	if err != nil {
-		return nil, "", err
+		return nil, version{}, err
 	}
-	return data, res.Header.Get("ETag"), nil
+	return data, versionOf(res.Header), nil
 }
 
 // unconditional are the servers, by endpoint and bucket, found to refuse a
@@ -196,7 +226,7 @@ var unconditional sync.Map
 // put writes the backup over the version read (etag) — or, with none, only
 // where there is none yet — and errChanged when another computer wrote in
 // between.
-func (s *s3) put(ctx context.Context, data []byte, etag string) error {
+func (s *s3) put(ctx context.Context, data []byte, etag string) (version, error) {
 	where := s.endpoint.String() + " " + s.bucket
 	if _, no := unconditional.Load(where); !no {
 		h := map[string]string{"Content-Type": "application/octet-stream"}
@@ -207,19 +237,19 @@ func (s *s3) put(ctx context.Context, data []byte, etag string) error {
 		}
 		res, err := s.send(ctx, http.MethodPut, data, h)
 		if err != nil {
-			return err
+			return version{}, err
 		}
 		defer res.Body.Close()
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
-			return nil
+			return version{ETag: res.Header.Get("ETag")}, nil
 		}
 		e := readError(res)
 		switch {
 		// 409 ConditionalRequestConflict: AWS's for two conditional writes at once
 		case e.Status == http.StatusPreconditionFailed || e.Code == "ConditionalRequestConflict":
-			return errChanged
+			return version{}, errChanged
 		case !noConditions(e):
-			return s.explain("write", e)
+			return version{}, s.explain("write", e)
 		}
 		unconditional.Store(where, true)
 	}
@@ -231,20 +261,20 @@ func (s *s3) put(ctx context.Context, data []byte, etag string) error {
 	// one at any other time since this computer read is still caught.
 	now, there, err := s.head(ctx)
 	if err != nil {
-		return err
+		return version{}, err
 	}
 	if there != (etag != "") || there && bareETag(now) != bareETag(etag) {
-		return errChanged
+		return version{}, errChanged
 	}
 	res, err := s.send(ctx, http.MethodPut, data, map[string]string{"Content-Type": "application/octet-stream"})
 	if err != nil {
-		return err
+		return version{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
-		return nil
+		return version{ETag: res.Header.Get("ETag")}, nil
 	}
-	return s.explain("write", readError(res))
+	return version{}, s.explain("write", readError(res))
 }
 
 // noConditions is an answer to a conditional PUT that says the server

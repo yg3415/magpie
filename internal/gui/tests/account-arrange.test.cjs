@@ -48,7 +48,8 @@ function fixture() {
         if (!first?.on) return json({ error: "turn this account on before moving it first" }, 400);
         arrange(p, body.accountOrder);
       }
-      if (url.pathname === "/api/provider/route") p.routing = body.routing;
+      // the editor's Routing is made with its Save
+      if (url.pathname === "/api/provider/save" && body.routing !== undefined) p.routing = body.routing;
       if (["/api/keys/use", "/api/login/switch"].includes(url.pathname)) {
         const first = body.ref || body.user;
         arrange(p, [first, ...items(p).map(item => id(p, item)).filter(ref => ref !== first)]);
@@ -108,15 +109,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     for (const id of ["antigravity", "relay"]) {
       await open(page, id);
       for (const [mode, label] of [["", "Smart"], ["order", "In order"], ["rotate", "In turn"], ["usage", "Least used first"]]) {
-        // Smart may already be selected. The old routing value alone says
-        // nothing about whether its POST has finished redrawing the editor.
-        const oldFirst = await rows(page).first().elementHandle();
-        const routeResponse = page.waitForResponse(response =>
-          new URL(response.url()).pathname === "/api/provider/route" && response.request().method() === "POST");
+        // picked, then made with the editor's Save, which closes it
+        const saveResponse = page.waitForResponse(response =>
+          new URL(response.url()).pathname === "/api/provider/save" && response.request().method() === "POST");
         await page.locator(".editor .segs button", { hasText: new RegExp(`^${label}$`) }).click();
-        assert.equal((await routeResponse).status(), 200);
-        await page.waitForFunction(row => !row.isConnected, oldFirst);
+        await page.locator(".editor .bar button", { hasText: /^Save$/ }).click();
+        assert.equal((await saveResponse).status(), 200);
+        await page.waitForFunction(() => !document.querySelector(".editor"));
         assert.equal(f.providers.providers.find(p => p.id === id).routing, mode);
+        await open(page, id);
         const before = await ids(page), count = f.posted.filter(p => p.action === "/api/provider/arrange").length;
         await drag(page);
         assert.deepEqual(await ids(page), [before[1], before[0], ...before.slice(2)]);

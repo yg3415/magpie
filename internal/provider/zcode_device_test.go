@@ -61,10 +61,10 @@ func TestZCodeSignInStartPlanDeviceMid(t *testing.T) {
 	if got := zcodeDeviceMid(); got != id {
 		t.Fatalf("changed between runs: %q %q", got, id)
 	}
-	// and it goes on the Start Plan's model requests too
+	// but not on the Start Plan's model requests, which ZCode sends without it
 	req, _ := http.NewRequest("POST", u.srv.URL+"/api/v1/zcode-plan/anthropic/v1/messages", nil)
 	zcodeSourceHeaders(req)
-	if req.Header.Get("X-Device-Mid") != id {
+	if req.Header.Get("X-Device-Mid") != "" {
 		t.Fatalf("model request: %v", req.Header)
 	}
 	// not to Z.ai's business API

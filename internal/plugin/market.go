@@ -14,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/source"
 )
 
 // The plugin market: the plugins magpie suggests, from the community
@@ -128,13 +131,7 @@ func InfoCached(names []string) map[string]NPM {
 	return out
 }
 
-func marketCache() string {
-	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "plugin-market.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "magpie", "plugin-market.json")
-}
+func marketCache() string { return filepath.Join(appdir.Cache(), "plugin-market.json") }
 
 func parseMarket(b []byte) ([]Listing, error) {
 	var r registry
@@ -172,7 +169,7 @@ func Market(ctx context.Context) []Listing {
 	}
 	if src != "off" {
 		c, cancel := context.WithTimeout(ctx, 6*time.Second)
-		b, err := fetchJSON(c, src, 1<<20)
+		b, err := fetchJSONOfficial(c, src, 1<<20)
 		cancel()
 		if err == nil {
 			if l, err := parseMarket(b); err == nil {
@@ -196,13 +193,26 @@ func Market(ctx context.Context) []Listing {
 }
 
 func fetchJSON(ctx context.Context, u string, limit int64) ([]byte, error) {
+	return fetchJSONFrom(ctx, u, limit, true)
+}
+
+func fetchJSONOfficial(ctx context.Context, u string, limit int64) ([]byte, error) {
+	return fetchJSONFrom(ctx, u, limit, false)
+}
+
+func fetchJSONFrom(ctx context.Context, u string, limit int64, mirror bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "magpie")
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	var res *http.Response
+	if mirror {
+		res, err = source.Do(http.DefaultClient, req)
+	} else {
+		res, err = source.DoOfficial(http.DefaultClient, req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -211,12 +221,21 @@ func fetchJSON(ctx context.Context, u string, limit int64) ([]byte, error) {
 		return nil, errNotFound
 	}
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: %s", u, res.Status)
+		return nil, &statusError{URL: u, Code: res.StatusCode, Status: res.Status}
 	}
 	return io.ReadAll(io.LimitReader(res.Body, limit))
 }
 
 var errNotFound = errors.New("not found")
+
+// statusError is a server's answer other than 200 or 404.
+type statusError struct {
+	URL    string
+	Code   int
+	Status string
+}
+
+func (e *statusError) Error() string { return e.URL + ": " + e.Status }
 
 // npmPath is a package's name as the registry's paths take it.
 func npmPath(name string) string { return strings.Replace(url.PathEscape(name), "%40", "@", 1) }
@@ -337,6 +356,16 @@ func repoURL(v any) string {
 }
 
 func npmInfo(ctx context.Context, name string) (NPM, bool) {
+	info, err := npmAsk(ctx, name)
+	if err != nil {
+		return NPM{}, errors.Is(err, errNotFound) // not on npm: known, and kept
+	}
+	return info, true
+}
+
+// npmAsk is what npm says of the package now, or why it said nothing:
+// errNotFound when it has no such package.
+func npmAsk(ctx context.Context, name string) (NPM, error) {
 	var info NPM
 	var wg sync.WaitGroup
 	var latestErr error
@@ -376,9 +405,9 @@ func npmInfo(ctx context.Context, name string) (NPM, bool) {
 	wg.Wait()
 	info.Weekly = weekly
 	if latestErr != nil {
-		return NPM{}, errors.Is(latestErr, errNotFound) // not on npm: known, and kept
+		return NPM{}, latestErr
 	}
-	return info, true
+	return info, nil
 }
 
 // Hit is a package npm's search found.
@@ -396,7 +425,7 @@ func Search(ctx context.Context, q string) ([]Hit, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	v := url.Values{"text": {q + " opencode"}, "size": {"30"}}
-	b, err := fetchJSON(ctx, "https://registry.npmjs.org/-/v1/search?"+v.Encode(), 4<<20)
+	b, err := fetchJSON(ctx, npmRegistry+"/-/v1/search?"+v.Encode(), 4<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +488,7 @@ func Readme(ctx context.Context, name string) (Page, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	b, err := fetchJSON(ctx, "https://registry.npmjs.org/"+npmPath(name), 32<<20)
+	b, err := fetchJSON(ctx, npmRegistry+"/"+npmPath(name), 32<<20)
 	if err != nil {
 		return Page{}, err
 	}

@@ -22,7 +22,6 @@ package agent
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -60,17 +59,20 @@ type droidEntry struct {
 }
 
 // droidEntries are magpie's custom models as the catalog is now.
-func droidEntries() []droidEntry {
+func droidEntries() []droidEntry { return droidEntriesAt(gateway.URL()) }
+
+// droidEntriesAt are droidEntries for a droid reaching the gateway at gw.
+func droidEntriesAt(gw string) []droidEntry {
 	var out []droidEntry
 	for _, m := range magpieModels("droid") {
-		e := droidEntry{Model: m.ID, ID: droidID + m.ID, BaseURL: gatewayV1(), APIKey: gateway.Token,
+		e := droidEntry{Model: m.ID, ID: droidID + m.ID, BaseURL: gw + "/v1", APIKey: gateway.Token,
 			Provider: "generic-chat-completion-api", MaxContextLimit: m.Context, MaxOutputTokens: maxTokens(m), NoImageSupport: !m.Images}
 		switch {
 		case slices.Contains(m.APIs, string(provider.Responses)):
 			e.Provider = "openai"
 		case slices.Contains(m.APIs, string(provider.Anthropic)):
 			// Anthropic's SDK adds the /v1 itself
-			e.Provider, e.BaseURL = "anthropic", gateway.URL()
+			e.Provider, e.BaseURL = "anthropic", gw
 		}
 		// the catalog's own label ("pro · DeepSeek") is what the picker
 		// shows; droid finds the model by its id, whatever its name
@@ -124,10 +126,17 @@ func droidCustoms(path, key string) []droidCustom {
 	return out
 }
 
-func droid(home string) *Agent {
-	if h := os.Getenv("FACTORY_HOME_OVERRIDE"); h != "" {
+func droid(home string) *Agent { return droidIn(here(home)) }
+
+// droidIn is Droid at a place: this machine's home, or a WSL distro's (see
+// wsl.go), where FACTORY_HOME_OVERRIDE isn't read and its custom models
+// name the gateway as the distro reaches it.
+func droidIn(at place) *Agent {
+	home := at.home
+	if h := at.getenv("FACTORY_HOME_OVERRIDE"); h != "" {
 		home = h
 	}
+	droidEntries := func() []droidEntry { return droidEntriesAt(at.gw()) }
 	dir := filepath.Join(home, ".factory")
 	path := filepath.Join(dir, "settings.json")
 	legacy := filepath.Join(dir, "config.json")
@@ -224,9 +233,9 @@ func droid(home string) *Agent {
 				return "Droid's custom model " + v + " (settings.json) is gone, so it no longer reaches magpie"
 			}
 			r := gjson.ParseBytes(c.raw)
-			base := gatewayV1()
+			base := at.v1()
 			if r.Get("provider").String() == "anthropic" {
-				base = gateway.URL()
+				base = at.gw()
 			}
 			return wiringOff("Droid", path, func(k string) (string, bool) { g := r.Get(k); return g.String(), g.Exists() },
 				"baseUrl", base, "apiKey", gateway.Token)

@@ -142,7 +142,7 @@ func sameModel(opts []Option, ref string) Option {
 			if o.Ref == "" || strings.HasPrefix(o.Ref, provider.GroupPrefix) || !served(o.Ref) {
 				continue
 			}
-			if _, m, _ := strings.Cut(o.Ref, "/"); provider.AutoGroupID(m) == gid {
+			if pid, m, _ := strings.Cut(o.Ref, "/"); provider.AutoGroupOf(pid, m) == gid {
 				return o
 			}
 		}

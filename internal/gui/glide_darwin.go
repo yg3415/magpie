@@ -111,7 +111,11 @@ static void setDock(int on, int front) {
 */
 import "C"
 
-import "github.com/wailsapp/wails/v3/pkg/application"
+import (
+	"unsafe"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
+)
 
 // glidePanel moves the shown panel to height, its top edge held under the
 // menu bar. It says false when it can't, for the caller to size it plainly.
@@ -127,7 +131,16 @@ func (h *host) glidePanel(height int, g Glide) bool {
 
 // TintPanel paints the panel's tint under the page, fading to it over ms.
 func (h *host) TintPanel(c [4]uint8, ms int) bool {
-	w := h.panel.NativeWindow()
+	// tintPanel waits for the main thread, so it can't run on it; winMu
+	// keeps lightweight mode from letting the panel go meanwhile
+	h.winMu.Lock()
+	defer h.winMu.Unlock()
+	w := application.InvokeSyncWithResult(func() unsafe.Pointer {
+		if h.panel == nil {
+			return nil
+		}
+		return h.panel.NativeWindow()
+	})
 	if w == nil {
 		return false
 	}

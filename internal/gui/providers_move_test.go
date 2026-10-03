@@ -18,8 +18,8 @@ func TestMoveOutlivesRequest(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("PATH", t.TempDir())
-	oldMove, oldBack := moveProvider, moveBackProvider
-	t.Cleanup(func() { moveProvider, moveBackProvider = oldMove, oldBack })
+	oldMove, oldBack, oldAdopt := moveProvider, moveBackProvider, adoptProvider
+	t.Cleanup(func() { moveProvider, moveBackProvider, adoptProvider = oldMove, oldBack, oldAdopt })
 	var got []string
 	check := func(ctx context.Context, id string) error {
 		_, deadline := ctx.Deadline()
@@ -30,16 +30,16 @@ func TestMoveOutlivesRequest(t *testing.T) {
 		}
 		return nil
 	}
-	moveProvider, moveBackProvider = check, check
+	moveProvider, moveBackProvider, adoptProvider = check, check, check
 	mux := http.NewServeMux()
 	providerRoutes(mux, nil)
-	for _, action := range []string{"move", "moveback"} {
+	for _, action := range []string{"move", "moveback", "adopt"} {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // the page went away
 		r := httptest.NewRequest("POST", "/api/provider/"+action, strings.NewReader(`{"id":"zed"}`)).WithContext(ctx)
 		mux.ServeHTTP(httptest.NewRecorder(), r)
 	}
-	if strings.Join(got, ",") != "zed: going,zed: going" {
+	if strings.Join(got, ",") != "zed: going,zed: going,zed: going" {
 		t.Fatalf("%v", got)
 	}
 }

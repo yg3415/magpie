@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -38,6 +39,21 @@ type updater struct {
 	done    int64     // downloading: bytes so far, of total (0 when unknown)
 	total   int64
 	onReady func(version string)
+	// the waiting update's notes follow the pages' language (freecss on
+	// Discord): the one they last asked in, else the app's
+	lang     string    // the pages' language, "" before one asked
+	notesIn  string    // the language latest's notes are in
+	relangAt time.Time // when they were last asked for in another
+	// A restart asked for while the gateway is busy waits until it is idle
+	// (#577): waiting since waitFrom, then whenIdle restarts, unless it ran
+	// waitMost first (gaveUp). onWait tells the tray what it waits on.
+	waiting  bool
+	waitFrom time.Time
+	waitGen  int
+	gaveUp   bool
+	whenIdle func() bool
+	onWait   func()
+	loops    sync.WaitGroup // the waits going on
 }
 
 type updateJSON struct {
@@ -51,6 +67,12 @@ type updateJSON struct {
 	Error   string `json:"error,omitempty"`
 	Done    int64  `json:"done,omitempty"` // downloading: bytes so far
 	Total   int64  `json:"total,omitempty"`
+	// ready: what the gateway this process serves has in flight, which a
+	// restart would cut short; Waiting, the restart waits for it to end;
+	// GaveUp, the last wait ran out with it still busy
+	Busy    *gateway.Busy `json:"busy,omitempty"`
+	Waiting bool          `json:"waiting,omitempty"`
+	GaveUp  bool          `json:"gaveUp,omitempty"`
 }
 
 var updates = &updater{}
@@ -131,7 +153,13 @@ func (u *updater) begin() bool {
 func (u *updater) run() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	rel, err := update.Latest(ctx)
+	u.mu.Lock()
+	lang := u.lang
+	u.mu.Unlock()
+	if lang == "" {
+		lang = trayLang(settings.Load().Lang, systemLang)
+	}
+	rel, err := update.LatestIn(ctx, lang)
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.staged != "" && u.latest != nil && (err != nil || !update.Newer(rel.Version, u.latest.Version)) {
@@ -142,7 +170,7 @@ func (u *updater) run() {
 		u.state, u.err = "error", err.Error()
 		return
 	}
-	u.latest = rel
+	u.latest, u.notesIn = rel, lang
 	switch {
 	case !update.Released(Version):
 		u.state = "source"
@@ -235,9 +263,22 @@ func (u *updater) replaced() bool {
 	return u.exe != "" && update.Replaced(u.exe, u.self)
 }
 
-func (u *updater) json() updateJSON {
+func (u *updater) json() updateJSON { return u.jsonIn("") }
+
+// jsonIn is the state as a page in lang ("" when it doesn't say) shows it.
+// Notes held in another language are asked for again in lang, at most
+// once a minute; the page's next look has them.
+func (u *updater) jsonIn(lang string) updateJSON {
+	busy := gatewayBusy()
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if lang != "" {
+		u.lang = lang
+		if u.latest != nil && u.notesIn != lang && u.state != "checking" && time.Since(u.relangAt) >= time.Minute {
+			u.relangAt = time.Now()
+			go u.relang(u.latest.Version, lang)
+		}
+	}
 	j := updateJSON{State: u.state, Current: Version, Error: u.err, Retry: u.retry}
 	if u.state == "checking" && u.staged != "" {
 		j.State = "ready" // what was downloaded can still be restarted into
@@ -248,6 +289,12 @@ func (u *updater) json() updateJSON {
 	if u.state == "downloading" {
 		j.Done, j.Total = u.done, u.total
 	}
+	if j.State == "ready" || u.waiting {
+		j.Waiting, j.GaveUp = u.waiting, u.gaveUp && !u.waiting
+		if busy.Any() {
+			j.Busy = &busy
+		}
+	}
 	if u.latest != nil {
 		// the notes without their download links: magpie downloads it itself
 		j.Latest, j.Notes, j.URL = u.latest.Version, update.StripInstall(u.latest.Notes), u.latest.URL
@@ -255,13 +302,44 @@ func (u *updater) json() updateJSON {
 	return j
 }
 
+// inLang has the next checks ask for the notes in lang ("" leaves it).
+func (u *updater) inLang(lang string) {
+	if lang == "" {
+		return
+	}
+	u.mu.Lock()
+	u.lang = lang
+	u.mu.Unlock()
+}
+
+// relang asks the feed again for version's notes in lang, the pages'
+// language not being the one they were asked in.
+func (u *updater) relang(version, lang string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rel, err := update.LatestIn(ctx, lang)
+	if err != nil {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.latest == nil || u.latest.Version != version || rel.Version != version {
+		return // a check since has its own
+	}
+	c := *u.latest // the download may still be reading the one held
+	c.Notes = rel.Notes
+	u.latest, u.notesIn = &c, lang
+}
+
 func updateRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/update", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, updates.json())
+		writeJSON(rw, updates.jsonIn(askedLang(r)))
 	})
 	mux.HandleFunc("POST /api/update/check", func(rw http.ResponseWriter, r *http.Request) {
+		lang := askedLang(r)
+		updates.inLang(lang) // the check's notes are in the page's language
 		updates.check()
-		writeJSON(rw, updates.json())
+		writeJSON(rw, updates.jsonIn(lang))
 	})
 	// install restarts into the staged version; after a failed download it
 	// downloads it again, and the page restarts once it's in. Only an app
@@ -270,9 +348,29 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("POST /api/update/install", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
 			View string `json:"view"`
+			// When: "now" restarts whatever is in flight, "cancel" stops
+			// a restart waiting; else a busy gateway is waited for (#577)
+			When string `json:"when"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.When == "cancel" {
+			updates.cancelWait()
+			writeJSON(rw, updates.json())
+			return
+		}
 		if updates.json().State == "ready" {
+			if in.When != "now" && !updates.idle() {
+				updates.waitIdle(func() bool {
+					if restartToUpdate(isWeb(w), in.View != "" || mainShown(w), in.View) {
+						go w.Quit()
+						return true
+					}
+					return false
+				})
+				writeJSON(rw, updates.json())
+				return
+			}
+			updates.cancelWait()
 			updates.recheck()
 		}
 		switch j := updates.json(); {
@@ -300,9 +398,16 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 // only the tray icon when not; the Mac's always opens its window.
 func restartToUpdate(web, window bool, view string) bool {
 	bundle, exe := updates.bundle, updates.exe
+	updates.mu.Lock()
+	version := ""
+	if updates.latest != nil {
+		version = updates.latest.Version
+	}
+	updates.mu.Unlock()
 	if !updates.install(true) {
 		return false
 	}
+	updatedInApp(version) // its first start leaves the notes to Settings (#525)
 	if web {
 		webReexec.Store(true)
 		return true

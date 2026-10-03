@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/mcpauth"
 )
 
 // The problems of the last change to the library stay on the page until the
@@ -74,6 +75,9 @@ func revealable(v *library.View) []string {
 		out = append(out, p.Dir)
 		for _, e := range p.Placed {
 			out = append(out, filepath.Join(p.Dir, filepath.FromSlash(e)))
+		}
+		for f := range p.Wrote {
+			out = append(out, filepath.Join(p.Dir, filepath.FromSlash(f)))
 		}
 	}
 	return out
@@ -195,6 +199,15 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, v)
 	})
+	// rtk put on the PATH the agents get, when magpie found it off it
+	mux.HandleFunc("POST /api/library/rtk/path", func(rw http.ResponseWriter, r *http.Request) {
+		v, err := library.PathRTK()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
 	mux.HandleFunc("POST /api/library/rtk/install", func(rw http.ResponseWriter, r *http.Request) {
 		v, err := library.InstallRTK()
 		if err != nil {
@@ -246,6 +259,50 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	// magpie signs in to a remote server once, for every agent given it (#615)
+	mux.HandleFunc("POST /api/library/mcp-signin", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Name string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" {
+			http.Error(rw, "no server", http.StatusBadRequest)
+			return
+		}
+		st, err := library.SignInServer(r.Context(), in.Name)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		w.OpenURL(st.URL)
+		writeJSON(rw, st)
+	})
+	mux.HandleFunc("GET /api/library/mcp-signin/{id}", func(rw http.ResponseWriter, r *http.Request) {
+		st, ok := mcpauth.Progress(r.PathValue("id"))
+		if !ok {
+			http.NotFound(rw, r)
+			return
+		}
+		writeJSON(rw, st)
+	})
+	mux.HandleFunc("POST /api/library/mcp-signin/{id}/cancel", func(rw http.ResponseWriter, r *http.Request) {
+		mcpauth.Cancel(r.PathValue("id"))
+		rw.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /api/library/mcp-signout", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Name string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" {
+			http.Error(rw, "no server", http.StatusBadRequest)
+			return
+		}
+		if err := library.SignOutServer(in.Name); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := libraryView(nil)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
 	// every change answers with the page as it is after it, and what it did
 	mux.HandleFunc("POST /api/library/{what}/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -263,6 +320,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			Values map[string]string // what a market server needs
 			Dir    string            // a project's folder
 			Copy   bool              // a project gets copies, not links
+			Keep   bool              // a project removed keeps what magpie put in it
 			On     bool              // every skill or server given to the agents, or taken from them
 			library.InstructionsChange
 		}
@@ -320,9 +378,11 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		case "projects/add":
 			res, err = library.AddProject(in.Dir)
 		case "projects/remove":
-			res, err = library.RemoveProject(in.Dir)
+			res, err = library.RemoveProject(in.Dir, in.Keep)
 		case "projects/skill":
 			res, err = library.ProjectSkill(in.Dir, in.Name, in.Agents)
+		case "projects/server":
+			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents)
 		case "projects/copy":
 			res, err = library.ProjectCopy(in.Dir, in.Copy)
 		case "all/sync":

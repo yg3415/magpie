@@ -250,6 +250,78 @@ func (a *Account) Lists(model string) bool {
 	return slices.ContainsFunc(live, func(m catalog.Model) bool { return m.ID == model })
 }
 
+// Levels are the reasoning levels the account's own list gives the model —
+// a Free ChatGPT plan's may be fewer than a Plus one's — and ok is false
+// when that list wasn't fetched, doesn't have the model or gives it none.
+func (a *Account) Levels(model string) (levels []string, ok bool) {
+	if a == nil || a.plugin != nil {
+		return nil, false
+	}
+	live, _, found := catalog.Live(accountModels(a.Agent, a.User))
+	if !found {
+		return nil, false
+	}
+	for _, m := range live {
+		if m.ID == model && len(m.Efforts) > 0 {
+			return m.Efforts, true
+		}
+	}
+	return nil, false
+}
+
+// codexPoolLevels gives each of ms — the list of the account Codex is
+// signed in to — the reasoning levels any other account on gives it too:
+// the provider's levels are what its accounts together take, so a Free
+// account signed in, whose plan lacks high, doesn't lower the request a
+// Plus one beside it answers (#520); the gateway sends each account only
+// what its own list takes (Account.Levels) first.
+func codexPoolLevels(ms []catalog.Model) []catalog.Model {
+	var lists [][]catalog.Model
+	for _, l := range Logins("codex") {
+		if l.Active || !l.On {
+			continue
+		}
+		if live, _, ok := catalog.Live(accountModels("codex", l.User)); ok {
+			lists = append(lists, live)
+		}
+	}
+	if len(lists) == 0 {
+		return ms
+	}
+	out := slices.Clone(ms)
+	for i, m := range out {
+		if len(m.Efforts) == 0 {
+			continue
+		}
+		efforts := slices.Clone(m.Efforts)
+		for _, live := range lists {
+			for _, o := range live {
+				if o.ID != m.ID {
+					continue
+				}
+				for _, e := range o.Efforts {
+					if !slices.Contains(efforts, e) {
+						efforts = append(efforts, e)
+					}
+				}
+			}
+		}
+		if len(efforts) > len(m.Efforts) {
+			slices.SortStableFunc(efforts, func(a, b string) int { return levelRank(a) - levelRank(b) })
+			out[i].Efforts = efforts
+		}
+	}
+	return out
+}
+
+// levelRank is a reasoning level's place among Levels; one it lacks goes last.
+func levelRank(e string) int {
+	if i := slices.Index(Levels, e); i >= 0 {
+		return i
+	}
+	return len(Levels)
+}
+
 // codexFetchSaved asks for the models of each saved ChatGPT account that
 // stands behind the one Codex is signed in to, with that account's own
 // sign-in, so the gateway doesn't send one a model its plan lacks. One that

@@ -262,3 +262,41 @@ func TestUnknownClaudeGoesFirst(t *testing.T) {
 		t.Fatalf("other agent: %+v", w)
 	}
 }
+
+// Smart with an account that has the five hours alone (Claude
+// Enterprise): they renew soonest, so it goes first, ahead of weeks — but
+// behind a week renewing sooner still — and so does it with its five
+// hours not started, which renew within five hours of now (#576), not
+// after every week as a reset not known.
+func TestSmartFiveHoursAlone(t *testing.T) {
+	old := allowances
+	defer func() { allowances = old }()
+	now := time.Now().Truncate(time.Hour).Add(20 * time.Minute)
+	five, week := 5*time.Hour, 7*24*time.Hour
+	weekly := func(in time.Duration) provider.Allowance {
+		return provider.Allowance{
+			{Used: 10, Resets: now.Add(time.Hour), Span: five},
+			{Used: 30, Resets: now.Add(in), Span: week},
+		}
+	}
+	share := map[string]provider.Allowance{
+		"w": weekly(2 * 24 * time.Hour),
+		"e": {{Used: 0, Span: five}}, // not started
+	}
+	allowances = func(string) map[string]provider.Allowance { return share }
+	acct := func(user string) candidate {
+		return candidate{p: provider.Provider{Account: &provider.Account{Agent: "x", User: user}}, model: "m", rest: "s#" + user}
+	}
+	p := provider.Provider{ID: "s", Account: &provider.Account{Agent: "x"}}
+	if got := restsOf(route(p, []candidate{acct("w"), acct("e")}, "m", provider.Chat)); got != "s#e s#w " {
+		t.Fatalf("five hours not started, ahead of a week in two days: %s", got)
+	}
+	share["e"] = provider.Allowance{{Used: 40, Resets: now.Add(3 * time.Hour), Span: five}}
+	if got := restsOf(route(p, []candidate{acct("w"), acct("e")}, "m", provider.Chat)); got != "s#e s#w " {
+		t.Fatalf("five hours started, ahead of a week in two days: %s", got)
+	}
+	share["w"] = weekly(time.Hour)
+	if got := restsOf(route(p, []candidate{acct("e"), acct("w")}, "m", provider.Chat)); got != "s#w s#e " {
+		t.Fatalf("a week renewing within the hour first: %s", got)
+	}
+}

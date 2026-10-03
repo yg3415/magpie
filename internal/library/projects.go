@@ -32,6 +32,15 @@ type Project struct {
 	// once they're empty; Gitignore is whether it made the .gitignore
 	Made      []string `json:"made,omitempty"`
 	Gitignore bool     `json:"gitignore,omitempty"`
+	// Servers are the library's MCP servers the project has, and for which
+	// agents (project_mcp.go)
+	Servers map[string][]string `json:"servers,omitempty"`
+	// Wrote are, by the project's file (.mcp.json), the servers magpie
+	// wrote in it, the only entries it ever takes out
+	Wrote map[string][]string `json:"wrote,omitempty"`
+	// MadeFiles are the files magpie made to write servers in, listed in
+	// the .gitignore and taken away again once nothing's left in them
+	MadeFiles []string `json:"madeFiles,omitempty"`
 }
 
 // projectSkillsDirs is where, in a project, each agent reads skills of its
@@ -85,7 +94,7 @@ func (l *Library) syncProject(p *Project, res *Result) {
 		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:" + name, Error: err.Error()})
 	}
 	if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
-		if len(p.Skills) > 0 || len(p.Placed) > 0 {
+		if len(p.Skills) > 0 || len(p.Placed) > 0 || len(p.Servers) > 0 || len(p.Wrote) > 0 {
 			fail("", fmt.Errorf("the folder is gone"))
 		}
 		return
@@ -138,6 +147,9 @@ func (l *Library) syncProject(p *Project, res *Result) {
 	}
 	sort.Strings(placed)
 	p.Placed = placed
+	l.syncProjectMCP(p, func(what string, err error) {
+		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:" + what, Error: err.Error()})
+	})
 	if err := p.writeIgnore(); err != nil {
 		fail("", fmt.Errorf(".gitignore: %w", err))
 	}
@@ -231,12 +243,13 @@ func (p *Project) writeIgnore() error {
 	}
 	rest := stripIgnore(strings.ReplaceAll(string(b), "\r\n", "\n"))
 	out := rest
-	if len(p.Placed) > 0 {
+	if ignored := slices.Concat(p.Placed, p.MadeFiles); len(ignored) > 0 {
+		sort.Strings(ignored)
 		if out != "" {
 			out += "\n"
 		}
 		out += ignoreBegin + "\n"
-		for _, e := range p.Placed {
+		for _, e := range ignored {
 			out += "/" + e + "\n"
 		}
 		out += ignoreEnd + "\n"
@@ -326,20 +339,38 @@ func notGlobal(dir string) error {
 			}
 		}
 	}
+	for _, t := range Targets() {
+		if t.MCP == nil {
+			continue
+		}
+		for _, f := range projectMCPFiles {
+			if realDir(filepath.Join(dir, filepath.FromSlash(f.rel))) == realDir(t.MCP.Path) {
+				return fmt.Errorf("%s in there is %s's own MCP file", f.rel, t.Agent.Name)
+			}
+		}
+	}
 	return nil
 }
 
 // RemoveProject takes every skill magpie placed out of a project, and the
 // project off the list; what's left, it couldn't take away and says why.
-func RemoveProject(dir string) (*Result, error) {
+// keep takes the project off the list alone (#514: a project given a few
+// skills or servers once, to keep them): everything magpie put in the
+// folder — skills, servers in the agents' files, its lines in the
+// .gitignore — stays as it is, the user's from then on.
+func RemoveProject(dir string, keep bool) (*Result, error) {
 	return change(func(l *Library) error {
 		p := l.project(dir)
 		if p == nil {
 			return fmt.Errorf("no project %s", dir)
 		}
-		p.Skills = nil
+		if keep {
+			l.Projects = slices.DeleteFunc(l.Projects, func(x *Project) bool { return x == p })
+			return nil
+		}
+		p.Skills, p.Servers = nil, nil
 		l.syncProject(p, &Result{})
-		if len(p.Placed) == 0 {
+		if len(p.Placed) == 0 && len(p.Wrote) == 0 {
 			l.Projects = slices.DeleteFunc(l.Projects, func(x *Project) bool { return x == p })
 		}
 		return nil
@@ -396,6 +427,9 @@ type ProjectView struct {
 	Copy    bool                `json:"copy"`
 	Skills  map[string][]string `json:"skills"`
 	Placed  []string            `json:"placed"`
+	Servers map[string][]string `json:"servers"`
+	// Wrote are, by the project's file, the servers magpie wrote there
+	Wrote   map[string][]string `json:"wrote"`
 	Missing bool                `json:"missing,omitempty"` // the folder is gone
 	// Problems are, by skill ("" for the project's own), what couldn't be done
 	Problems map[string]string `json:"problems,omitempty"`
@@ -407,6 +441,13 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 		v := ProjectView{Dir: p.Dir, Name: filepath.Base(p.Dir), Copy: p.Copy, Skills: map[string][]string{}, Placed: append([]string{}, p.Placed...)}
 		for k, a := range p.Skills {
 			v.Skills[k] = append([]string{}, a...)
+		}
+		v.Servers, v.Wrote = map[string][]string{}, map[string][]string{}
+		for k, a := range p.Servers {
+			v.Servers[k] = append([]string{}, a...)
+		}
+		for k, a := range p.Wrote {
+			v.Wrote[k] = append([]string{}, a...)
 		}
 		if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
 			v.Missing = true

@@ -183,8 +183,17 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 			New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
-			if rec.Code != 200 || strings.Contains(sent, "aGVsbG8=") || !strings.Contains(sent, "Image omitted") || !strings.Contains(sent, "call_1") {
+			if rec.Code != 200 || strings.Contains(sent, "aGVsbG8=") || !strings.Contains(sent, "Image omitted") {
 				t.Fatalf("tool image: %d %s; upstream %s", rec.Code, rec.Body.String(), sent)
+			}
+			if tc.name == "responses-to-chat" {
+				// an orphaned tool result reaches a Chat upstream as a
+				// user message: no call pairs with it, no id is made up
+				if strings.Contains(sent, "call_1") || !strings.Contains(sent, "screenshot") {
+					t.Fatalf("orphaned tool result: %s", sent)
+				}
+			} else if !strings.Contains(sent, "call_1") {
+				t.Fatalf("tool result lost its call id: %s", sent)
 			}
 			if tc.endpoint == "responses" {
 				var request struct {

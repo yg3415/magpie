@@ -29,11 +29,15 @@ func NotesFeed() string {
 }
 
 // NotesBetween asks the site for the notes of every release after after
-// (none when "") up to and including upto, newest first.
-func NotesBetween(ctx context.Context, after, upto string) ([]Note, error) {
+// (none when "") up to and including upto, newest first, in lang (see
+// InLang).
+func NotesBetween(ctx context.Context, after, upto, lang string) ([]Note, error) {
 	q := url.Values{"upto": {upto}}
 	if after != "" {
 		q.Set("after", after)
+	}
+	if lang != "" {
+		q.Set("lang", lang)
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", NotesFeed()+"?"+q.Encode(), nil)
 	if err != nil {
@@ -53,7 +57,46 @@ func NotesBetween(ctx context.Context, after, upto string) ([]Note, error) {
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("release notes: %w", err)
 	}
+	for i := range out.Releases {
+		out.Releases[i].Notes = InLang(out.Releases[i].Notes, lang)
+	}
 	return Between(out.Releases, after, upto), nil
+}
+
+// zhMarker is where a release's notes turn from English to Chinese: the
+// release workflow translates them and puts the Chinese below it.
+const zhMarker = "<!-- lang:zh -->"
+
+// InLang is a release's notes in lang, as the site cuts them (a site from
+// before it did, or a feed elsewhere, hands them whole): "zh" the Chinese
+// where there is some, else the English, everything above the marker.
+// Notes from before the marker are English alone, in any language.
+func InLang(md, lang string) string {
+	i := strings.Index(md, zhMarker)
+	if i < 0 {
+		return md
+	}
+	if lang == "zh" {
+		if zh := strings.TrimSpace(md[i+len(zhMarker):]); zh != "" {
+			return zh
+		}
+	}
+	return strings.TrimSpace(md[:i])
+}
+
+// withLang adds lang to a feed's address, as ?lang= (or &lang=).
+func withLang(feed, lang string) string {
+	if lang == "" {
+		return feed
+	}
+	u, err := url.Parse(feed)
+	if err != nil {
+		return feed
+	}
+	q := u.Query()
+	q.Set("lang", lang)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // MaxNotes is how many releases' notes are shown at most: magpie releases

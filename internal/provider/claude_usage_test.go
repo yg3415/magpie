@@ -22,7 +22,7 @@ func fakeClaudeUsage(t *testing.T, out *atomic.Value, fail *atomic.Bool) *atomic
 	UsageClaudeVia(func(context.Context) (string, error) {
 		runs.Add(1)
 		if fail != nil && fail.Load() {
-			return "", errors.New("Claude Code: offline")
+			return "", errors.New("Claude Code: network is unreachable")
 		}
 		return out.Load().(string), nil
 	})

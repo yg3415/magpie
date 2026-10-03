@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -47,15 +48,17 @@ func (g *gw) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"model": "art/gpt-image-1", "data": data})
 }
 
-// client talks to a server over pipes, answering roots/list with root.
+// client talks to a server over pipes, answering roots/list with root, and
+// keeps the notifications it is sent.
 type client struct {
-	t    *testing.T
-	in   *io.PipeWriter
-	out  *bufio.Scanner
-	root string
+	t     *testing.T
+	in    *io.PipeWriter
+	out   *bufio.Scanner
+	root  string
+	notes []map[string]any
 }
 
-func start(t *testing.T, g *gw, root string) *client {
+func start(t *testing.T, g http.Handler, root string) *client {
 	up := httptest.NewServer(g)
 	t.Cleanup(up.Close)
 	inR, inW := io.Pipe()
@@ -92,6 +95,10 @@ func (c *client) call(method string, params any) map[string]any {
 		if m["method"] == "roots/list" {
 			ans, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": m["id"], "result": map[string]any{"roots": []any{map[string]any{"uri": fileURI(c.root), "name": "p"}}}})
 			go c.in.Write(append(ans, '\n'))
+			continue
+		}
+		if m["method"] != nil && m["id"] == nil {
+			c.notes = append(c.notes, m)
 			continue
 		}
 		if m["error"] != nil {
@@ -400,5 +407,60 @@ func TestFilePath(t *testing.T) {
 		if got := filePath(u); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
 		}
+	}
+}
+
+// #575: an image model that takes longer than the agent gives a tool call
+// (ZCode's 30 s, the MCP SDK's 60 s) is answered "still being made" before
+// then, with an id generation_result waits on; the image is still saved,
+// and asked for once.
+func TestSlowImageAnswersBeforeTheAgentGivesUp(t *testing.T) {
+	wasWithin, wasEvery := answerWithin, progressEvery
+	answerWithin, progressEvery = 150*time.Millisecond, 30*time.Millisecond
+	t.Cleanup(func() { answerWithin, progressEvery = wasWithin, wasEvery })
+	g := &gw{}
+	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(700 * time.Millisecond)
+		g.ServeHTTP(w, r)
+	})
+	project := t.TempDir()
+	c := start(t, slow, project)
+	c.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{"roots": map[string]any{}}, "clientInfo": map[string]any{"name": "zcode", "version": "1"}})
+	began := time.Now()
+	r := c.call("tools/call", map[string]any{"name": "generate_image", "arguments": map[string]any{"prompt": "a whale", "path": "whale.png"}, "_meta": map[string]any{"progressToken": "tok-1"}})
+	if took := time.Since(began); took > 500*time.Millisecond {
+		t.Fatalf("the call took %s, past what the agent gives it: %v", took, r)
+	}
+	m := regexp.MustCompile(`generation_result with id "([^"]+)"`).FindStringSubmatch(text(r))
+	if r["isError"] == true || m == nil {
+		t.Fatalf("%v", r)
+	}
+	if len(c.notes) == 0 || c.notes[0]["method"] != "notifications/progress" || c.notes[0]["params"].(map[string]any)["progressToken"] != "tok-1" {
+		t.Fatalf("progress %v", c.notes)
+	}
+	tools, _ := json.Marshal(c.call("tools/list", map[string]any{}))
+	if !strings.Contains(string(tools), `"generation_result"`) {
+		t.Fatalf("tools %s", tools)
+	}
+	saved := filepath.Join(project, "whale.png")
+	var out string
+	for range 20 {
+		r = c.call("tools/call", map[string]any{"name": "generation_result", "arguments": map[string]any{"id": m[1]}})
+		if out = text(r); r["isError"] == true || strings.Contains(out, saved) {
+			break
+		}
+	}
+	if r["isError"] == true || !strings.Contains(out, saved) {
+		t.Fatalf("%v", r)
+	}
+	if b, _ := os.ReadFile(saved); string(b) != string(png) {
+		t.Fatalf("file %q", b)
+	}
+	// asked again, it says the same; the gateway was asked once
+	if r = c.call("tools/call", map[string]any{"name": "generation_result", "arguments": map[string]any{"id": m[1]}}); !strings.Contains(text(r), saved) || len(g.path) != 1 {
+		t.Fatalf("%v, asked %v", r, g.path)
+	}
+	if r = c.call("tools/call", map[string]any{"name": "generation_result", "arguments": map[string]any{"id": "image-0-0"}}); r["isError"] != true {
+		t.Fatalf("an unknown id: %v", r)
 	}
 }

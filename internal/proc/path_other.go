@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,8 +25,35 @@ func UserPath() {
 	go func() {
 		if p := shellPath(); p != "" {
 			addPath(filepath.SplitList(p))
+			login.Lock()
+			login.dirs, login.at = filepath.SplitList(p), time.Now()
+			login.Unlock()
 		}
 	}()
+}
+
+var login struct {
+	sync.Mutex
+	dirs []string
+	at   time.Time
+}
+
+// LoginPath is the PATH a terminal opened now has — the login shell's — for
+// telling whether a command an agent runs by name is found there, which
+// the app's own PATH can't: UserPath adds folders the shell may not have.
+// nil when the shell doesn't say; asked again after a minute.
+func LoginPath() []string {
+	login.Lock()
+	defer login.Unlock()
+	if login.dirs != nil && time.Since(login.at) < time.Minute {
+		return login.dirs
+	}
+	p := shellPath()
+	if p == "" {
+		return nil
+	}
+	login.dirs, login.at = filepath.SplitList(p), time.Now()
+	return login.dirs
 }
 
 // UserBinDirs are the folders a user's command-line tools are installed in

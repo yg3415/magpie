@@ -101,7 +101,7 @@ func TestCursorDecodesTheEnd(t *testing.T) {
 		t.Fatal(got)
 	}
 	for _, ev := range evs {
-		if ev.Kind == KUsage && (ev.Usage.Input != 120 || ev.Usage.Output != 30 || ev.Usage.CacheRead != 7) {
+		if ev.Kind == KUsage && (ev.Usage.Input != 113 || ev.Usage.Output != 30 || ev.Usage.CacheRead != 7) {
 			t.Fatalf("usage %+v", ev.Usage)
 		}
 	}
@@ -153,7 +153,7 @@ func TestCursorMessages(t *testing.T) {
 func TestBuildCursorRun(t *testing.T) {
 	msgs := [][]byte{[]byte(`{"role":"user","content":"hi"}`)}
 	tools := []bridgeTool{{Name: "read", InputSchema: json.RawMessage(`{"type":"object","required":["p"]}`)}}
-	run, blobs := buildCursorRun(msgs, "hi", tools, "gpt-5.4")
+	run, blobs := buildCursorRun(msgs, "hi", tools, "gpt-5.4", "", false)
 	rr := pbFields(pbFields(run)[0].data)
 	var state []pbField
 	var models, mcp []string

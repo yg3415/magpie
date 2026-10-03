@@ -91,6 +91,7 @@ func NoteClaudeLimits(user string, ls []ClaudeLimit) {
 	}
 	slices.SortStableFunc(ws, func(a, b QuotaWindow) int { return order(a) - order(b) })
 	e.ws, e.at, e.heard = ws, time.Now(), time.Now()
+	e.err = nil // a new observation supersedes the failed reading
 	c.m[key] = e
 	c.Unlock()
 	StaleAllowance("claude", user)

@@ -320,6 +320,25 @@ func TestSearchToldAsAnthropics(t *testing.T) {
 	}
 }
 
+// DeepSeek's Responses API takes the hosted web_search tool (#512): a
+// DeepSeek provider searches by itself there, and only there, so a request
+// offering web search stays on /v1/responses rather than going to Chat
+// without the tool.
+func TestDeepSeekSearchesOnResponses(t *testing.T) {
+	p, err := provider.FromPreset("deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !searchesItself(p, provider.Responses) {
+		t.Error("DeepSeek doesn't search by itself on its Responses API")
+	}
+	for _, proto := range []provider.Protocol{provider.Chat, provider.Anthropic} {
+		if searchesItself(p, proto) {
+			t.Errorf("DeepSeek searches by itself on %s", proto)
+		}
+	}
+}
+
 // Grok moved to its plugin searches by itself as the built-in did: it is
 // known by its id, its account being the plugin's.
 func TestMovedGrokSearchesItself(t *testing.T) {

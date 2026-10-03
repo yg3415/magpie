@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -20,8 +21,20 @@ import (
 func init() {
 	movers["zcode"] = &mover{
 		pkg:    "@magpie-community/opencode-zcode-auth",
-		min:    "0.1.5", // a failure's status and its sign-in mark as the built-in's; MCP quota set aside as the built-in's
+		min:    "0.1.7", // a failure's status and its sign-in mark as the built-in's; MCP quota set aside as the built-in's
 		agents: []string{"zcode"},
+		// a Start Plan account was never served GLM-5.3, by the built-in
+		// or by ZCode, and the plugin lists it no more than they do; its
+		// plan as its requests found it, else as it showed it, nothing
+		// asked of Z.ai
+		builtin: func(_ context.Context, a Moving, model string) bool {
+			for _, l := range zcodeLogins() {
+				if strings.EqualFold(l.User, a.User) {
+					return !zcodeOnStartAs(nil, l.key, l.Plan) || zcodeStartServes()(model)
+				}
+			}
+			return true
+		},
 		out: func() ([]Moving, error) {
 			var out []Moving
 			for _, l := range zcodeLogins() {

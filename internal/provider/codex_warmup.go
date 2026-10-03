@@ -350,7 +350,7 @@ func warmCodexLogin(ctx context.Context, user string) error {
 }
 
 // warmModel is the model a warm-up asks, and at what effort: the account's
-// smallest (a mini) or else the first it lists, at low.
+// cheapest (warmPick), at low.
 func warmModel(user string) (model, effort string, err error) {
 	ms, _, ok := catalog.Live(accountModels("codex", user))
 	if !ok {
@@ -362,10 +362,7 @@ func warmModel(user string) (model, effort string, err error) {
 	if len(ms) == 0 {
 		return "", "", errors.New("no Codex model is known yet")
 	}
-	m := ms[0]
-	if i := slices.IndexFunc(ms, func(m catalog.Model) bool { return strings.Contains(m.ID, "mini") }); i >= 0 {
-		m = ms[i]
-	}
+	m := warmPick(ms, func(id string) (catalog.Price, bool) { return catalog.PricedBy([]string{"openai"}, id) })
 	switch {
 	case slices.Contains(m.Efforts, "low"):
 		effort = "low"
@@ -373,6 +370,34 @@ func warmModel(user string) (model, effort string, err error) {
 		effort = m.Efforts[0]
 	}
 	return m.ID, effort, nil
+}
+
+// warmPick is the cheapest of an account's models, by its list price where
+// models.dev has one (#604: GPT-6's cheap one is gpt-6-luna; the list
+// has no mini and starts with the flagship gpt-6.1-sol); with no price
+// known, a mini, else a luna, else the first it lists.
+func warmPick(ms []catalog.Model, price func(id string) (catalog.Price, bool)) catalog.Model {
+	best, cost := -1, 0.0
+	for i, m := range ms {
+		p, ok := catalog.Price{}, false
+		if m.Price != nil {
+			p, ok = *m.Price, true
+		} else {
+			p, ok = price(m.ID)
+		}
+		if c := p.Input + p.Output; ok && c > 0 && (best < 0 || c < cost) {
+			best, cost = i, c
+		}
+	}
+	if best >= 0 {
+		return ms[best]
+	}
+	for _, word := range []string{"mini", "luna"} {
+		if i := slices.IndexFunc(ms, func(m catalog.Model) bool { return strings.Contains(m.ID, word) }); i >= 0 {
+			return ms[i]
+		}
+	}
+	return ms[0]
 }
 
 // warmCodex sends one "hi" to the ChatGPT backend as a Codex account's

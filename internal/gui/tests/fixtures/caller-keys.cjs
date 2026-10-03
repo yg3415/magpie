@@ -14,6 +14,7 @@ function fixture(lang, theme, events, options = {}) {
     { id: "server", name: "Server", masked: "sk-magpie-key-…222222" },
     { id: "work", name: "Work", masked: "sk-magpie-key-…333333" },
   ];
+  for (const k of keys) if (options.limits?.[k.id]) Object.assign(k, options.limits[k.id]);
   let serial = 0;
   let lan = !!options.lan;
   let lanKeyID = "", rotations = 0, lanSecret = "";
@@ -102,6 +103,12 @@ function fixture(lang, theme, events, options = {}) {
       }
       if (action === "remove-key") keys = keys.filter((v) => v !== k);
       if (action === "on-key" || action === "off-key") k.off = action === "off-key";
+      if (action === "limit-key") {
+        // what a key has used is the fixture's; a new limit starts unused
+        k.limit = body.limit || undefined;
+        k.used = body.limit ? { period: body.limit.period, start: new Date().toISOString(), reset: new Date(Date.now() + 864e5).toISOString(),
+          calls: 0, tokens: 0, cost: 0, tokenLimit: body.limit.tokens, costLimit: body.limit.cost, tokensLeft: body.limit.tokens, costLeft: body.limit.cost, spent: false } : undefined;
+      }
       if (action === "copy-key") secret = k.id === lanKeyID ? lanSecret : secrets.get(k.id);
       return json({ keys, secret });
     }

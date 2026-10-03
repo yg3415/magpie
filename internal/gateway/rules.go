@@ -317,6 +317,12 @@ func memberContexts(ms []provider.Member) map[string]int {
 				if c, ok := out[m.ID]; !ok || e.Context > 0 && (c == 0 || e.Context < c) {
 					out[m.ID] = e.Context
 				}
+				// a model the group names that a group in it has too (named)
+				if n := len(m.Path); n > 1 {
+					if _, ok := out[m.Path[n-1]]; !ok {
+						out[m.Path[n-1]] = e.Context
+					}
+				}
 				break
 			}
 		}
@@ -381,6 +387,15 @@ func (s *Server) nestedRules(at string, req *Request, agent string, ask classifi
 	return out, keys, cands, pl
 }
 
+// named reports whether m is the group's member id: the model, or one of
+// the models of the group in the group it is. A model the group names
+// itself that a group in it, ahead of it, names too is kept where it was
+// met first (provider's membersIn), in that group, and a rule naming it
+// is still its (#625).
+func named(m provider.Member, id string) bool {
+	return m.ID == id || !strings.HasPrefix(id, provider.GroupPrefix) && len(m.Path) > 1 && m.Path[len(m.Path)-1] == id
+}
+
 // ruleMembers are the models of the member a rule names, among those
 // ready now: the model, or a group in the group's.
 func ruleMembers(hit *RuleHit, ms []provider.Member) []provider.Member {
@@ -389,11 +404,21 @@ func ruleMembers(hit *RuleHit, ms []provider.Member) []provider.Member {
 	}
 	var out []provider.Member
 	for _, m := range ms {
-		if m.ID == hit.Use {
+		if named(m, hit.Use) {
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// modelRuled reports whether the one going first is a model the group's
+// rule names itself: one a group in the group has too goes there, and that
+// group's rules don't pick another over it (#625).
+func modelRuled(hit *RuleHit, ms []provider.Member, cs []candidate) bool {
+	if hit == nil || strings.HasPrefix(hit.Use, provider.GroupPrefix) || len(cs) == 0 {
+		return false
+	}
+	return slices.ContainsFunc(ruleMembers(hit, ms), func(m provider.Member) bool { return ofMember(cs[0], m) })
 }
 
 // ruleOrder is who a rule's request goes to before the group's others:
@@ -405,7 +430,7 @@ func ruleOrder(hit *RuleHit, ms []provider.Member) []provider.Member {
 	}
 	for _, id := range hit.Then {
 		for _, m := range ms {
-			if m.ID == id {
+			if named(m, id) {
 				out = append(out, m)
 			}
 		}
@@ -461,9 +486,13 @@ func applyRule(hit *RuleHit, ms []provider.Member, cs []candidate, pl planned) (
 	if len(ordered) > 0 && len(cs) > 0 {
 		cs, pl, lead = ruleFirst(ordered, cs, pl)
 	}
-	hit.Unready = lead < 0 || ordered[lead].ID != hit.Use
+	// ordered has the rule's own first, then those of the rules after it
+	hit.Unready = lead < 0 || lead >= len(ruleMembers(hit, ms))
 	if lead >= 0 && hit.Unready {
 		hit.Instead = ordered[lead].ID
+		if i := slices.IndexFunc(hit.Then, func(id string) bool { return named(ordered[lead], id) }); i >= 0 {
+			hit.Instead = hit.Then[i]
+		}
 	}
 	return cs, pl, lead >= 0
 }

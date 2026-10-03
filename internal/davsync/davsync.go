@@ -15,6 +15,7 @@
 package davsync
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,6 +39,7 @@ import (
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // Every is how often the gateway's magpie syncs.
@@ -65,6 +67,9 @@ type Config struct {
 	// Library is whether the library goes too; nil, as in a setup made
 	// before it could, is yes
 	Library *bool `json:"library,omitempty"`
+	// Usage is whether this computer shares its usage with the others
+	// syncing to the server, and sees theirs (#542)
+	Usage bool `json:"usage,omitempty"`
 	// Other is the other kind's server, kept when sync moved from it (a
 	// WebDAV folder's while an S3 bucket is synced to, or the other way):
 	// moving back finds it as it was, its password too. Nothing syncs to it.
@@ -126,13 +131,17 @@ type Notice struct {
 // state is what the last sync saw: the parts here and on the server, by
 // hash, and the server's file.
 type state struct {
-	Key    string            `json:"key"` // the address, user and passphrase it was for
-	Last   time.Time         `json:"last,omitzero"`
-	Error  string            `json:"error,omitempty"`
-	Notice *Notice           `json:"notice,omitempty"`
-	Sum    string            `json:"sum,omitempty"` // the server's file, hashed
+	Key    string    `json:"key"` // the address, user and passphrase it was for
+	Last   time.Time `json:"last,omitzero"`
+	Error  string    `json:"error,omitempty"`
+	Notice *Notice   `json:"notice,omitempty"`
+	Sum    string    `json:"sum,omitempty"` // the server's file, hashed
+	// Server is that file's version, as the server tells it: the next sync
+	// asks for the file only if it isn't still this one
+	Server version           `json:"server,omitzero"`
 	Local  map[string]string `json:"local,omitempty"`
 	Remote map[string]string `json:"remote,omitempty"`
+	Usage  *usageState       `json:"usage,omitempty"`
 }
 
 func path(name string) string { return filepath.Join(settings.Dir(), name) }
@@ -291,6 +300,8 @@ func (c Config) sameAccount(o Config) bool {
 func Off() error {
 	return locked(func() error {
 		os.Remove(path("sync-state.json"))
+		os.Remove(path(cacheName))
+		usage.DropAllShared() // the others' usage came by sync: it goes with it (#542)
 		if err := os.Remove(path("sync.json")); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -300,21 +311,24 @@ func Off() error {
 
 // View is sync as the Settings page shows it: never the secrets.
 type View struct {
-	On            bool      `json:"on"`
-	URL           string    `json:"url,omitempty"`
-	User          string    `json:"user,omitempty"`
-	PasswordSet   bool      `json:"passwordSet,omitempty"`
-	PassphraseSet bool      `json:"passphraseSet,omitempty"`
-	Keys          bool      `json:"keys"`
-	Agents        bool      `json:"agents"`
-	Kind          string    `json:"kind,omitempty"` // "webdav" or "s3", when on
-	Endpoint      string    `json:"endpoint,omitempty"`
-	Region        string    `json:"region,omitempty"`
-	PathStyle     bool      `json:"pathStyle,omitempty"`
-	Library       bool      `json:"library"`
-	Last          time.Time `json:"last,omitzero"`
-	Error         string    `json:"error,omitempty"`
-	Notice        *Notice   `json:"notice,omitempty"`
+	On            bool   `json:"on"`
+	URL           string `json:"url,omitempty"`
+	User          string `json:"user,omitempty"`
+	PasswordSet   bool   `json:"passwordSet,omitempty"`
+	PassphraseSet bool   `json:"passphraseSet,omitempty"`
+	Keys          bool   `json:"keys"`
+	Agents        bool   `json:"agents"`
+	Kind          string `json:"kind,omitempty"` // "webdav" or "s3", when on
+	Endpoint      string `json:"endpoint,omitempty"`
+	Region        string `json:"region,omitempty"`
+	PathStyle     bool   `json:"pathStyle,omitempty"`
+	Library       bool   `json:"library"`
+	Usage         bool   `json:"usage,omitempty"`
+	// UsageError is why usage couldn't be shared the last time it was tried
+	UsageError string    `json:"usageError,omitempty"`
+	Last       time.Time `json:"last,omitzero"`
+	Error      string    `json:"error,omitempty"`
+	Notice     *Notice   `json:"notice,omitempty"`
 	// Other is the other kind's server, kept for moving back to: not
 	// synced to
 	Other *OtherView `json:"other,omitempty"`
@@ -343,7 +357,11 @@ func Status() View {
 		Kind: strings.ToLower(c.Kind()), Endpoint: c.Endpoint, Region: c.Region, PathStyle: c.PathStyle}
 	if st.Key == stateKey(c) {
 		v.Last = st.Last
+		if c.Usage && st.Usage != nil {
+			v.UsageError = st.Usage.Error
+		}
 	}
+	v.Usage = c.Usage
 	if o := c.Other; o != nil {
 		v.Other = &OtherView{Kind: strings.ToLower(o.config().Kind()), URL: o.URL, User: o.User, PasswordSet: o.Password != "",
 			Endpoint: o.Endpoint, Region: o.Region, PathStyle: o.PathStyle}
@@ -383,6 +401,55 @@ func stateKey(c Config) string {
 	return sum([]byte(k + "\x00" + c.User + "\x00" + c.Passphrase))
 }
 
+// cacheName is the copy of the server's file as last read or written, kept
+// readable by the user alone: a sync that finds it unchanged on the server
+// but something changed here merges with it, rather than reading it again.
+const cacheName = "sync-server" + backup.Ext
+
+// remember keeps data as the server's file last seen.
+func remember(data []byte) {
+	if b, err := os.ReadFile(path(cacheName)); err == nil && sum(b) == sum(data) {
+		return
+	}
+	os.MkdirAll(settings.Dir(), 0o755)
+	if edit.WriteAtomic(path(cacheName), data) == nil {
+		os.Chmod(path(cacheName), 0o600)
+	}
+}
+
+// cached is the server's file as last seen, when it is the one hashed to
+// want; nil when it isn't kept.
+func cached(want string) []byte {
+	b, err := os.ReadFile(path(cacheName))
+	if err != nil || want == "" || sum(b) != want {
+		return nil
+	}
+	return b
+}
+
+// keepDamaged writes a server file that couldn't be read aside under the
+// sync folder, so the damage is inspectable rather than silently replaced.
+// It keeps the newest few: a sync that rebuilds on every tick (a server
+// that always answers the same unreadable way) would otherwise pile up a
+// copy each time. The name is sorted by time, so the oldest are the first
+// to go.
+func keepDamaged(data []byte) {
+	dir := path("sync")
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	name := filepath.Join(dir, time.Now().Format("2006-01-02-150405")+"-server-damaged"+backup.Ext)
+	if edit.WriteAtomic(name, data) != nil {
+		return
+	}
+	old, _ := filepath.Glob(filepath.Join(dir, "*-server-damaged"+backup.Ext))
+	slices.Sort(old) // names begin with the time, so oldest first
+	for len(old) > 3 {
+		os.Remove(old[0])
+		old = old[1:]
+	}
+}
+
 func sum(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
@@ -390,8 +457,14 @@ func sum(b []byte) string {
 
 var mu sync.Mutex
 
-// Now syncs once; nothing when sync is off.
-func Now(ctx context.Context) error {
+// Now syncs once; nothing when sync is off. Usage is shared at most every
+// usageEvery.
+func Now(ctx context.Context) error { return syncNow(ctx, false) }
+
+// SyncNow is Now asked for: usage is shared whatever the time.
+func SyncNow(ctx context.Context) error { return syncNow(ctx, true) }
+
+func syncNow(ctx context.Context, force bool) error {
 	if _, ok := Load(); !ok { // off: no lock taken, so none made
 		return nil
 	}
@@ -421,17 +494,42 @@ func Now(ctx context.Context) error {
 		st.Error = err.Error()
 	} else {
 		st.Last = time.Now()
+		shareUsage(ctx, c, &st, force)
 	}
 	saveState(st)
 	return err
 }
 
+// maxWait is the longest Run waits for a server that is limiting requests
+// and didn't say for how long; one that says is waited for as long as it
+// asks, up to limitWait.
+const (
+	maxWait   = 30 * time.Minute
+	limitWait = 6 * time.Hour
+)
+
+// backoff is how long Run waits after a sync that ended with err, the last
+// wait having been prev: Every, but longer for a server limiting requests
+// (429, 503) — as long as its Retry-After says, or else twice the last
+// wait, up to maxWait — so that a limit is not run into again and again.
+func backoff(err error, prev time.Duration) time.Duration {
+	var rl *rateLimited
+	if !errors.As(err, &rl) {
+		return Every
+	}
+	if rl.after > 0 {
+		return min(max(rl.after, Every), limitWait)
+	}
+	return min(max(2*prev, 2*Every), maxWait)
+}
+
 // Run syncs a little after it starts and every Every after that, until
-// ctx ends. A failure is logged once, not on every try.
+// ctx ends — less often while the server is limiting requests. A failure
+// is logged once, not on every try.
 func Run(ctx context.Context) {
 	t := time.NewTimer(20 * time.Second)
 	defer t.Stop()
-	last := ""
+	last, next := "", Every
 	for {
 		select {
 		case <-ctx.Done():
@@ -451,7 +549,8 @@ func Run(ctx context.Context) {
 		} else if err == nil {
 			last = ""
 		}
-		t.Reset(Every)
+		next = backoff(err, next)
+		t.Reset(next)
 	}
 }
 
@@ -481,6 +580,9 @@ func hashes(b backup.Bundle) map[string]string {
 	providers := []any{b.Providers, b.Icons, b.Groups}
 	if b.Searches != nil && len(*b.Searches) > 0 { // as before them, without one
 		providers = append(providers, *b.Searches)
+	}
+	if len(b.Order) > 0 { // as before it, when never arranged
+		providers = append(providers, map[string][]string{"order": b.Order})
 	}
 	return map[string]string{
 		"providers": h(providers),
@@ -532,7 +634,7 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 			}
 			searches = &ss
 		}
-		to.Providers, to.Icons, to.Groups, to.Searches = ps, from.Icons, from.Groups, searches
+		to.Providers, to.Icons, to.Groups, to.Searches, to.Order = ps, from.Icons, from.Groups, searches, from.Order
 		to.Keys = to.Keys || from.Keys
 	case "settings":
 		to.Settings = from.Settings
@@ -592,6 +694,9 @@ func bring(b backup.Bundle, part string) error {
 		if err := provider.Mirror(b.Providers, b.Groups); err != nil {
 			return err
 		}
+		if err := provider.MirrorOrder(b.Order); err != nil {
+			return err
+		}
 		if b.Searches == nil { // from a magpie before them: the ones here stay
 			return nil
 		}
@@ -628,8 +733,11 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 	if err != nil {
 		return err
 	}
-	data, etag, err := d.get(ctx)
-	if err != nil {
+	// the file only if it changed since the last sync: one unchanged costs
+	// a request, not a download
+	data, ver, err := d.get(ctx, st.Server)
+	unchanged := errors.Is(err, errNotModified)
+	if err != nil && !unchanged {
 		return err
 	}
 	local, err := collect(c)
@@ -637,16 +745,32 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		return err
 	}
 	L := hashes(local)
+	if unchanged {
+		if maps.Equal(L, st.Local) {
+			return nil // nothing changed on either side
+		}
+		// changed here: merged with the server's file as last seen, or,
+		// when that copy is gone, with the file read again
+		if data = cached(st.Sum); data == nil {
+			if data, ver, err = d.get(ctx, version{}); err != nil {
+				return err
+			}
+		}
+	}
+	etag := ver.ETag
+	rebuilt := false // a damaged server file replaced by this computer's merge
 	push := func(b backup.Bundle, etag string) error {
 		b.Created, b.App = time.Now().UTC(), "magpie"
 		sealed, err := backup.Seal(b, c.Passphrase)
 		if err != nil {
 			return err
 		}
-		if err := d.put(ctx, sealed, etag); err != nil {
+		v, err := d.put(ctx, sealed, etag)
+		if err != nil {
 			return err
 		}
-		st.Sum, st.Remote = sum(sealed), hashes(b)
+		st.Sum, st.Server, st.Remote = sum(sealed), v, hashes(b)
+		remember(sealed)
 		return nil
 	}
 	if data == nil { // nothing there yet: this computer's setup is the first
@@ -657,6 +781,8 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		return nil
 	}
 	if sum(data) == st.Sum && maps.Equal(L, st.Local) {
+		st.Server = ver
+		remember(data)
 		return nil // nothing changed on either side
 	}
 	remote, err := backup.Open(data, c.Passphrase)
@@ -664,7 +790,57 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		return errors.New("the passphrase doesn't open the file on the server: it was sealed with another one; use the passphrase set on your other computers")
 	}
 	if err != nil {
-		return err
+		// The server's file can't be read as a backup: a write a relay or
+		// tunnel cut short, or one damaged since. Failing here would stop
+		// every sync after, because this computer's own setup is fine and
+		// could never be pushed over the unreadable file. But rebuilding
+		// must not lose another computer's newer setup that the damaged
+		// write swallowed, so this is not a place to push this computer's
+		// bundle as it is. It is a place to fall back to the last good copy
+		// of the server's file — the one this computer read whole before it
+		// broke — and merge over it as a normal sync would. That needs three
+		// things to hold, and any one missing means the error stands:
+		//   - this computer has synced before (st.Local): a fresh one has no
+		//     last-good copy and no right to rebuild what it never saw;
+		//   - the cached copy is the file this sync hashed (sum == st.Sum),
+		//     so it is the version the damage replaced, not some older one;
+		//   - the body really reads as a damaged backup, not as some other
+		//     answer a server gave (a captive portal's page): a body that
+		//     isn't backup-shaped at all is its own error, never rebuilt.
+		// The merge then runs with the cached copy as the remote and the
+		// damaged file's ETag as the version to replace, so the push is
+		// still checked against the server and another computer's parts
+		// survive the way they would on any sync.
+		if !errors.Is(err, backup.ErrCorrupt) || st.Local == nil {
+			return err
+		}
+		good := cached(st.Sum) // the version this computer last read whole
+		// The damaged body must be that version cut short — a prefix of it,
+		// which is what a relay that stops a long write leaves. But Seal
+		// writes with json.MarshalIndent, so every version starts with the
+		// same constant head up to the salt; a body cut inside that head is a
+		// prefix of every version, including an out-of-date computer's older
+		// cached copy. So the prefix check alone lets that computer rebuild
+		// and drop a newer one's data. Only a body reaching past the random
+		// fields — to the "data" key that follows them — is tied to the one
+		// version it was cut from. Requiring it keeps an out-of-date computer
+		// from rebuilding (its copy isn't the version that broke, so the body
+		// isn't its prefix and the error stands), and a body cut before the
+		// random fields stays an error for every computer, even the one that
+		// saw the good version: better to fail loud than rebuild blind. A
+		// sealed file holds a whole setup — hundreds of bytes at its very
+		// smallest — and a relay cuts a real write deep into the data, well
+		// past "data", so legit rebuilds still go.
+		if good == nil || !bytes.HasPrefix(good, data) || len(data) <= bytes.Index(good, []byte(`"data"`)) {
+			return err
+		}
+		remote, err = backup.Open(good, c.Passphrase)
+		if err != nil {
+			return err
+		}
+		keepDamaged(data) // the unreadable body, kept aside before it is replaced
+		data = good
+		rebuilt = true // push the merged result even if it matches the cached copy
 	}
 	R := hashes(remote)
 	first := st.Local == nil
@@ -734,11 +910,14 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 			pending[p] = st.Local[p]
 		}
 	}
-	st.Local, st.Sum, st.Remote = pending, sum(data), R
+	st.Local, st.Sum, st.Server, st.Remote = pending, sum(data), ver, R
+	remember(data)
 	if len(here)+len(there) > 0 {
 		st.Notice = &Notice{At: time.Now(), Here: here, There: there, Saved: saved}
 	}
-	if !maps.Equal(M, R) {
+	// A rebuild always writes back: the server's file is the damaged one,
+	// so even a merge that matches the cached copy must replace it.
+	if rebuilt || !maps.Equal(M, R) {
 		if err := push(merged, etag); err != nil {
 			return err
 		}

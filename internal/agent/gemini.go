@@ -163,6 +163,9 @@ func gemini(home string) *Agent {
 		ID: "gemini", Name: "Gemini CLI", Icon: "geminicli-color", Aliases: []string{"gemini-cli"},
 		UA:  []string{"geminicli", "gemini-cli"},
 		Bin: "gemini", Dir: dir, Path: path,
+		// its model's default forgets what it had before magpie, its
+		// sign-in's default forgets the sign-in: this puts both back
+		Unwire: unroute,
 		// Gemini CLI is its binary. What it leaves in ~/.gemini stays when it
 		// is uninstalled (#230), and Antigravity keeps its folders there too
 		// (antigravity, antigravity-cli, config) and reads GEMINI.md (#330),

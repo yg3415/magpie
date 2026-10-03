@@ -18,6 +18,7 @@
   let trashOn = false;
   const picked = new Set();   // ids picked to delete, of the agent shown
   const opened = new Set();   // folders unfolded, by cwd
+  const folderBoxes = new Map(); // each folder's box as drawn, by cwd
   let openedFor = "";         // the agent the folders were first unfolded for
   let detail = "";            // the session opened to its details
   let loading = 0;
@@ -158,12 +159,22 @@
     if (trashOn) { box.append(...trash()); return box; }
     if (!data.agents.length) {
       const e = el("div", "empty-state");
-      e.append(el("b", "", t("No sessions yet")), el("span", "", t("Claude Code's, Codex's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
+      e.append(el("b", "", t("No sessions yet")), el("span", "", t("Claude Code's, Codex's, Hermes's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
       box.append(e);
       return box;
     }
     const a = current();
-    if (a && !a.deletable) box.append(el("p", "usage-note sm-note", t("magpie can list {agent}'s sessions and resume them, but not delete them: they aren't kept as files of their own.", { agent: a.name })));
+    if (a && (data.sessions.some((s) => s.read_only) || !a.deletable)) {
+      const canResume = data.sessions.some((s) => s.resume);
+      const key = data.sessions.some((s) => s.read_only)
+        ? canResume
+          ? "Some {agent} sessions are read only and cannot be deleted."
+          : "These {agent} sessions are read only; magpie can list them, but cannot resume or delete them."
+        : canResume
+          ? "magpie can list {agent}'s sessions and resume them, but not delete them: they aren't kept as files of their own."
+          : "magpie can list {agent}'s sessions, but cannot resume or delete them.";
+      box.append(el("p", "usage-note sm-note", t(key, { agent: a.name })));
+    }
     box.append(selectBar(), el("div", "sm-tree"));
     queueMicrotask(redrawList);
     return box;
@@ -174,7 +185,7 @@
     const bar = el("div", "row-head sm-bar");
     const a = current();
     if (!a?.deletable) { bar.hidden = true; return bar; }
-    const list = shown();
+    const list = shown().filter((s) => !s.read_only);
     const all = el("input", "sm-check");
     all.type = "checkbox";
     all.checked = list.length > 0 && list.every((s) => picked.has(s.id));
@@ -189,9 +200,20 @@
     del.type = "button";
     del.disabled = !picked.size;
     del.append(svg(TRASH, 13, 1.4), el("span", "", t("Delete")));
-    del.onclick = () => askDelete([...picked]);
+    del.onclick = () => askDelete([...picked], wholeFolder([...picked]));
     bar.append(all, n, el("span", "grow"), del);
     return bar;
+  }
+
+  // wholeFolder: the folder (a cwd, "" for none) when ids are every
+  // session of that one folder, so the dialog names it
+  function wholeFolder(ids) {
+    const all = data?.sessions || [];
+    const set = new Set(ids);
+    const cwds = new Set(all.filter((s) => set.has(s.id)).map((s) => s.cwd || ""));
+    if (cwds.size !== 1) return undefined;
+    const [cwd] = cwds;
+    return all.filter((s) => (s.cwd || "") === cwd).every((s) => set.has(s.id)) ? cwd : undefined;
   }
 
   function redrawList() {
@@ -213,6 +235,7 @@
       groups.get(k).push(s);
     }
     tree.replaceChildren();
+    folderBoxes.clear();
     if (!list.length) {
       tree.append(el("div", "empty-state", query ? t("No session matches.") : t("No sessions yet")));
       return;
@@ -222,6 +245,27 @@
       const open = !!q || opened.has(cwd);
       const g = el("div", "list sm-group");
       const r = el("div", "row sm-folder");
+      const writable = items.filter((s) => !s.read_only);
+      // the folder's box picks every session of it shown, folded or not,
+      // for the bar's Delete; the bar still counts sessions (#527)
+      if (current()?.deletable && writable.length) {
+        const c = el("input", "sm-check sm-folder-check");
+        c.type = "checkbox";
+        // a session's own box ticked or not shows here at once
+        c.sync = () => {
+          c.checked = writable.every((s) => picked.has(s.id));
+          c.indeterminate = !c.checked && writable.some((s) => picked.has(s.id));
+        };
+        c.sync();
+        folderBoxes.set(cwd, c);
+        c.setAttribute("aria-label", t("Select every session in {folder}", { folder: cwd ? baseName(cwd) : t("No folder") }));
+        c.onclick = (e) => e.stopPropagation();
+        c.onchange = () => {
+          for (const s of writable) c.checked ? picked.add(s.id) : picked.delete(s.id);
+          redrawList();
+        };
+        r.append(c);
+      }
       const fold = el("button", "fold");
       fold.type = "button";
       fold.setAttribute("aria-expanded", String(open));
@@ -231,6 +275,7 @@
         redrawList();
       };
       r.append(fold, el("span", "sub sm-path", cwd), el("span", "grow"), el("span", "note", t(items.length === 1 ? "{n} session" : "{n} sessions", { n: items.length })));
+
       r.title = cwd;
       g.append(r);
       if (open) for (const s of items) g.append(item(s));
@@ -243,13 +288,13 @@
     const wrap = el("div", "sess-item sm-item" + (detail === s.id ? " open" : ""));
     const r = el("div", "row sess sm-sess");
     r.dataset.id = s.id;
-    if (a?.deletable) {
+    if (a?.deletable && !s.read_only) {
       const c = el("input", "sm-check");
       c.type = "checkbox";
       c.checked = picked.has(s.id);
       c.setAttribute("aria-label", t("Select"));
       c.onclick = (e) => e.stopPropagation();
-      c.onchange = () => { c.checked ? picked.add(s.id) : picked.delete(s.id); const bar = page.querySelector(".sm-bar"); if (bar) bar.replaceWith(selectBar()); };
+      c.onchange = () => { c.checked ? picked.add(s.id) : picked.delete(s.id); const bar = page.querySelector(".sm-bar"); if (bar) bar.replaceWith(selectBar()); folderBoxes.get(s.cwd || "")?.sync(); };
       r.append(c);
     }
     const who = el("div", "who");
@@ -281,7 +326,7 @@
         r.append(term);
       }
     }
-    if (a?.deletable) {
+    if (a?.deletable && !s.read_only) {
       const del = el("button", "copy sm-del");
       del.type = "button";
       del.title = t("Delete");
@@ -316,16 +361,25 @@
     return d;
   }
 
-  // askDelete asks in magpie's dialog before the sessions go to its trash
-  function askDelete(ids) {
+  // askDelete asks in magpie's dialog before the sessions go to its trash;
+  // folder (a cwd, "" for none) when they are every session of one folder
+  function askDelete(ids, folder) {
     const byID = new Map((data?.sessions || []).map((s) => [s.id, s]));
     const list = ids.map((id) => byID.get(id)).filter(Boolean);
     if (!list.length) return;
     const a = current();
     const ed = el("div", "editor sm-ask");
     const h = el("div", "ehead");
-    h.append(icon(a.icon), el("b", "", list.length === 1 ? t("Delete this session?") : t("Delete {n} sessions?", { n: list.length })));
+    const whole = folder !== undefined && list.length > 1;
+    // picked folders each whole: how many folders, as well as sessions
+    const cwds = new Set(list.map((s) => s.cwd || ""));
+    const folders = !whole && cwds.size > 1 && (data?.sessions || []).every((s) => !cwds.has(s.cwd || "") || ids.includes(s.id)) ? cwds.size : 0;
+    h.append(icon(a.icon), el("b", "", list.length === 1 ? t("Delete this session?")
+      : whole ? t("Delete all {n} sessions in {folder}?", { n: list.length, folder: folder ? baseName(folder) : t("No folder") })
+      : folders ? t("Delete all {n} sessions in {k} folders?", { n: list.length, k: folders })
+      : t("Delete {n} sessions?", { n: list.length })));
     ed.append(h);
+    if (folder) ed.append(el("p", "sub sm-ask-path", folder));
     const names = el("ul", "sm-ask-list");
     for (const s of list.slice(0, 5)) names.append(el("li", "", s.title || s.id));
     if (list.length > 5) names.append(el("li", "more", t("+{n} more", { n: list.length - 5 })));

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -22,6 +23,7 @@ type rItem struct {
 	Name      string          `json:"name,omitempty"`
 	Namespace string          `json:"namespace,omitempty"`
 	Arguments rArgs           `json:"arguments,omitempty"`
+	Input     string          `json:"input,omitempty"` // custom_tool_call's
 	Output    json.RawMessage `json:"output,omitempty"`
 	Status    string          `json:"status,omitempty"`
 	// tool_search_output: the tools Codex's search found, which the model
@@ -66,6 +68,60 @@ type rTool struct {
 	Strict      *bool           `json:"strict,omitempty"`
 	Tools       []rTool         `json:"tools,omitempty"` // a namespace's
 	Execution   string          `json:"execution,omitempty"`
+	Format      *rFormat        `json:"format,omitempty"` // a custom tool's
+}
+
+// rFormat is what a custom (freeform) tool's input is: "text", or a
+// "grammar" in a syntax ("lark", "regex") with its definition.
+type rFormat struct {
+	Type       string `json:"type"`
+	Syntax     string `json:"syntax,omitempty"`
+	Definition string `json:"definition,omitempty"`
+}
+
+// A custom tool takes free text, not JSON: Codex's apply_patch and, for
+// the models its catalog puts in code mode (gpt-6.1-sol, gpt-6-luna…),
+// exec, through which every other tool of Codex's is called (#534: offered
+// none, the model said it had only the collaboration and wait tools). A
+// model magpie translates for is offered it as a function taking the text
+// as its one argument, and its call goes back to Codex as the
+// custom_tool_call Codex runs, the text as its input.
+
+// customSchema is the arguments a custom tool is offered as taking.
+var customSchema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string","description":"The tool's free-form input, the whole of it, exactly as it is to be run."}},"required":["input"],"additionalProperties":false}`)
+
+// customDescription is a custom tool's description as a function's: its
+// own, what its input is, and the grammar the input follows.
+func customDescription(t rTool) string {
+	d := strings.TrimSpace(t.Description)
+	if d != "" {
+		d += "\n\n"
+	}
+	d += "Put the tool's whole free-form input, as it is to be run, in the `input` string; it is passed on as written, so it is not itself JSON."
+	if f := t.Format; f != nil && f.Type == "grammar" && strings.TrimSpace(f.Definition) != "" {
+		syntax := f.Syntax
+		if syntax == "" {
+			syntax = "the"
+		}
+		d += "\n\nThe input follows this " + syntax + " grammar:\n" + strings.TrimSpace(f.Definition)
+	}
+	return d
+}
+
+// customInput is the free-form input of a call the model made to a custom
+// tool offered as a function: its input argument, else what it gave.
+func customInput(args string) string {
+	var a struct {
+		Input *string `json:"input"`
+	}
+	if json.Unmarshal([]byte(args), &a) == nil && a.Input != nil {
+		return *a.Input
+	}
+	var str string
+	if json.Unmarshal([]byte(args), &str) == nil {
+		return str
+	}
+	return args
 }
 
 // toolSearch is Codex's tool search. With it Codex names its MCP tools (the
@@ -101,6 +157,42 @@ func searchFound(tools []rTool) string {
 
 // flatName is the name a namespaced tool is offered to a model under,
 // namespace__name, the same a Grok subscription is offered it under.
+// unsealed is a tool's parameters without the "encrypted" marks Codex puts
+// on some (spawn_agent's message): a translated request's calls go back to
+// Codex as unsealed (callTo's encrypted_function_args), so an upstream that
+// honours the mark must not seal them (#613).
+func unsealed(schema json.RawMessage) json.RawMessage {
+	if !bytes.Contains(schema, []byte(`"encrypted"`)) {
+		return schema
+	}
+	var v any
+	if json.Unmarshal(schema, &v) != nil {
+		return schema
+	}
+	var strip func(any)
+	strip = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if _, ok := x["encrypted"].(bool); ok {
+				delete(x, "encrypted")
+			}
+			for _, c := range x {
+				strip(c)
+			}
+		case []any:
+			for _, c := range x {
+				strip(c)
+			}
+		}
+	}
+	strip(v)
+	out, err := marshalPlain(v)
+	if err != nil {
+		return schema
+	}
+	return out
+}
+
 func flatName(namespace, name string) string {
 	return provider.FlatName(namespace, name)
 }
@@ -159,7 +251,18 @@ func parseResponses(body []byte) (*Request, error) {
 		if err := json.Unmarshal(q.Input, &items); err != nil {
 			return nil, fmt.Errorf("invalid input: %v", err)
 		}
-		for _, it := range items {
+		// replied: the conversation has had a turn answered. Codex adds a
+		// developer message where its context changed (world state, settings,
+		// a model switch) and keeps it there; lifted into the system prompt it
+		// changed the prompt's very start, so the whole conversation was
+		// written to the vendor's cache again (Anthropic's system comes
+		// first; a Claude subscription's waiting run is found by it) (#502)
+		replied := false
+		var rawItems []json.RawMessage // decoded only for native standalone outputs
+		for i, it := range items {
+			if it.Role == "assistant" || strings.HasPrefix(it.Type, "function_call") || strings.HasPrefix(it.Type, "custom_tool_call") || strings.HasPrefix(it.Type, "tool_search") || it.Type == "reasoning" {
+				replied = true
+			}
 			switch {
 			case it.Type == "message" || (it.Type == "" && it.Role != ""):
 				role := "user"
@@ -167,6 +270,13 @@ func parseResponses(body []byte) (*Request, error) {
 					role = "assistant"
 				}
 				parts := responsesParts(it.Content)
+				if (it.Role == "system" || it.Role == "developer") && replied {
+					// in place, told as the system's, not the user's words
+					if t := text(parts); t != "" {
+						r.Messages = append(r.Messages, Message{Role: "user", Parts: []Part{{Kind: Text, Text: "<system-reminder>\n" + t + "\n</system-reminder>"}}})
+					}
+					continue
+				}
 				if it.Role == "system" || it.Role == "developer" {
 					if t := text(parts); t != "" {
 						if r.System != "" {
@@ -190,14 +300,31 @@ func parseResponses(body []byte) (*Request, error) {
 					name = flatName(it.Namespace, it.Name)
 				}
 				r.Messages = append(r.Messages, Message{Role: "assistant", Parts: []Part{{Kind: ToolCall, ID: it.CallID, Name: name, Args: parseArgs(string(it.Arguments))}}})
+			case it.Type == "custom_tool_call":
+				name := it.Name
+				if it.Namespace != "" {
+					name = flatName(it.Namespace, it.Name)
+				}
+				args, _ := json.Marshal(map[string]string{"input": it.Input})
+				r.Messages = append(r.Messages, Message{Role: "assistant", Parts: []Part{{Kind: ToolCall, ID: it.CallID, Name: name, Args: args}}})
 			case it.Type == "tool_search_call":
 				r.Messages = append(r.Messages, Message{Role: "assistant", Parts: []Part{{Kind: ToolCall, ID: it.CallID, Name: toolSearch, Args: parseArgs(string(it.Arguments))}}})
 			case it.Type == "tool_search_output":
 				found = append(found, it.Tools...)
 				r.Messages = append(r.Messages, Message{Role: "user", Parts: []Part{{Kind: ToolResult, CallID: it.CallID, Text: searchFound(it.Tools)}}})
-			case it.Type == "function_call_output":
+			case it.Type == "function_call_output" || it.Type == "custom_tool_call_output":
 				out, images := toolOutput(it.Output)
-				r.Messages = append(r.Messages, Message{Role: "user", Parts: []Part{{Kind: ToolResult, CallID: it.CallID, Text: out, Images: images}}})
+				part := Part{Kind: ToolResult, CallID: it.CallID, Text: out, Images: images}
+				if it.CallID == "" {
+					// Native account requests may still need translation to
+					// collect a streamed response for a non-streaming client.
+					// Retain the original notification, including absent IDs.
+					if rawItems == nil {
+						_ = json.Unmarshal(q.Input, &rawItems)
+					}
+					_ = json.Unmarshal(rawItems[i], &part.Standalone)
+				}
+				r.Messages = append(r.Messages, Message{Role: "user", Parts: []Part{part}})
 			case it.Type == "reasoning":
 				// the reasoning itself when the item carries it, else its
 				// summary (all magpie gives a client of a translated reply)
@@ -243,16 +370,20 @@ func parseResponses(body []byte) (*Request, error) {
 		}
 		switch t.Type {
 		case "function":
-			offer(i, Tool{Name: t.Name, Description: t.Description, Schema: t.Parameters, Strict: t.Strict != nil && *t.Strict}, nsTool{})
+			offer(i, Tool{Name: t.Name, Description: t.Description, Schema: unsealed(t.Parameters), Strict: t.Strict != nil && *t.Strict}, nsTool{})
+		case "custom":
+			offer(i, Tool{Name: t.Name, Description: customDescription(t), Schema: customSchema}, nsTool{Name: t.Name, Custom: true})
 		case "namespace":
 			// offered flat, as few models know namespaces; a call is given
 			// its namespace back on the way out
 			for _, nt := range t.Tools {
-				if nt.Type != "function" {
-					continue
-				}
 				flat := flatName(t.Name, nt.Name)
-				offer(i, Tool{Name: flat, Description: nt.Description, Schema: nt.Parameters, Strict: nt.Strict != nil && *nt.Strict}, nsTool{Namespace: t.Name, Name: nt.Name})
+				switch nt.Type {
+				case "function":
+					offer(i, Tool{Name: flat, Description: nt.Description, Schema: unsealed(nt.Parameters), Strict: nt.Strict != nil && *nt.Strict}, nsTool{Namespace: t.Name, Name: nt.Name})
+				case "custom":
+					offer(i, Tool{Name: flat, Description: customDescription(nt), Schema: customSchema}, nsTool{Namespace: t.Name, Name: nt.Name, Custom: true})
+				}
 			}
 		case toolSearch:
 			if t.Execution == "client" {
@@ -285,7 +416,7 @@ func parseResponses(body []byte) (*Request, error) {
 				webSearch := false
 				for _, tool := range o.Tools {
 					switch {
-					case tool.Type == "function" && tool.Name != "":
+					case (tool.Type == "function" || tool.Type == "custom") && tool.Name != "":
 						if tool.Namespace != "" {
 							allowed[flatName(tool.Namespace, tool.Name)] = true
 						} else {
@@ -316,6 +447,89 @@ func parseResponses(body []byte) (*Request, error) {
 		}
 	}
 	return r, nil
+}
+
+// orphanedToolOutputs turns a tool result with no call ID into a user message.
+// Codex uses standalone outputs for cross-thread notifications. Backends
+// requiring paired outputs still need the delivered text, without a fake call ID.
+func orphanedToolOutputs(body []byte) []byte {
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return body
+	}
+	var input []json.RawMessage
+	if json.Unmarshal(q["input"], &input) != nil {
+		return body
+	}
+	changed := false
+	out := make([]json.RawMessage, 0, len(input))
+	var pending []json.RawMessage
+	inCalls, hadResults := false, false
+	flush := func() {
+		out = append(out, pending...)
+		pending = nil
+	}
+	for _, raw := range input {
+		var item struct {
+			Type   string          `json:"type"`
+			CallID string          `json:"call_id"`
+			Output json.RawMessage `json:"output"`
+		}
+		if json.Unmarshal(raw, &item) != nil {
+			flush()
+			inCalls = false
+			out = append(out, raw)
+			continue
+		}
+		isOutput := item.Type == "function_call_output" || item.Type == "custom_tool_call_output"
+		if !isOutput || item.CallID != "" {
+			switch item.Type {
+			case "function_call", "custom_tool_call", "tool_search_call":
+				if hadResults {
+					flush()
+				}
+				inCalls, hadResults = true, false
+			case "function_call_output", "custom_tool_call_output", "tool_search_output":
+				// Keep a run of tool results directly after its calls.
+				hadResults = true
+			default:
+				flush()
+				inCalls = false
+			}
+			out = append(out, raw)
+			continue
+		}
+		text, images := toolOutput(item.Output)
+		content := []map[string]any{}
+		if text != "" {
+			content = append(content, map[string]any{"type": "input_text", "text": text})
+		}
+		for _, image := range images {
+			content = append(content, map[string]any{"type": "input_image", "image_url": dataURL(image)})
+		}
+		if len(content) == 0 {
+			content = append(content, map[string]any{"type": "input_text", "text": "Tool result received."})
+		}
+		message, _ := marshalPlain(map[string]any{"type": "message", "role": "user", "content": content})
+		if inCalls {
+			// Chat rejects a user message between tool_calls and results,
+			// including between the results of parallel calls.
+			pending = append(pending, message)
+		} else {
+			out = append(out, message)
+		}
+		changed = true
+	}
+	flush()
+	if !changed {
+		return body
+	}
+	q["input"], _ = marshalPlain(out)
+	encoded, err := marshalPlain(q)
+	if err != nil {
+		return body
+	}
+	return encoded
 }
 
 // mergeTurns joins consecutive messages of the same role, since the
@@ -413,6 +627,10 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 				input = append(input, map[string]any{"type": "function_call", "call_id": id, "name": p.Name, "arguments": argsString(p)})
 			case ToolResult:
 				flushMsg()
+				if p.Standalone != nil {
+					input = append(input, p.Standalone)
+					continue
+				}
 				var output any = p.Text
 				if len(p.Images) > 0 {
 					// an output can be a list of text and images
@@ -523,37 +741,81 @@ type rUsage struct {
 	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
+		// what was written to the cache, which Codex reads too (#589)
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 }
 
+// usage: input_tokens is the whole prompt, what was read from the cache and
+// what was written to it among it.
 func (u rUsage) usage() Usage {
-	return Usage{Input: u.InputTokens - u.InputTokensDetails.CachedTokens, Output: u.OutputTokens,
-		CacheRead: u.InputTokensDetails.CachedTokens, Reasoning: u.OutputTokensDetails.ReasoningTokens}
+	d := u.InputTokensDetails
+	return Usage{Input: max(u.InputTokens-d.CachedTokens-d.CacheWriteTokens, 0), Output: u.OutputTokens,
+		CacheRead: d.CachedTokens, CacheWrite: d.CacheWriteTokens, Reasoning: u.OutputTokensDetails.ReasoningTokens}
 }
 
 func (u Usage) responses() map[string]any {
 	in := u.prompt()
 	return map[string]any{"input_tokens": in, "output_tokens": u.Output, "total_tokens": in + u.Output,
-		"input_tokens_details":  map[string]any{"cached_tokens": u.CacheRead},
+		"input_tokens_details":  map[string]any{"cached_tokens": u.CacheRead, "cache_write_tokens": u.CacheWrite},
 		"output_tokens_details": map[string]any{"reasoning_tokens": u.Reasoning}}
 }
 
 // responsesDecoder turns a Responses stream into events.
+//
+// A function call's arguments are given once the call is done, not as
+// their deltas come: the deltas can leave out what the finished call holds
+// (#613: Codex's spawn_agent came back with arguments {} where the request
+// was translated, though the upstream's finished call had them), and what
+// was sent of a call's arguments can't be taken back.
 type responsesDecoder struct {
-	started  bool
-	argsSeen bool // arguments of the open function call arrived as deltas
-	called   bool // a function call was streamed
+	started bool
+	called  bool            // a function call was streamed
+	calling bool            // a function call is open
+	args    strings.Builder // the open call's argument deltas
+	full    string          // the open call's arguments as its done events give them
+}
+
+// endCall gives the open call's arguments: the deltas, or what its done
+// events give where that holds more.
+func (d *responsesDecoder) endCall(emit func(Event)) {
+	if !d.calling {
+		return
+	}
+	d.calling = false
+	args := pickArgs(d.args.String(), d.full)
+	d.args.Reset()
+	d.full = ""
+	if args != "" {
+		emit(Event{Kind: KToolArgs, Text: args})
+	}
+}
+
+// pickArgs is the fuller of a call's arguments as streamed and as its done
+// events give them, JSON first.
+func pickArgs(streamed, done string) string {
+	s, f := strings.TrimSpace(streamed), strings.TrimSpace(done)
+	switch sv, fv := json.Valid([]byte(s)), json.Valid([]byte(f)); {
+	case fv && (!sv || len(f) > len(s)):
+		return done
+	case sv || f == "":
+		return streamed
+	default:
+		return done
+	}
 }
 
 func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 	var ev struct {
-		Type     string `json:"type"`
-		Delta    string `json:"delta"`
-		Item     rItem  `json:"item"`
-		Response struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+		Item  rItem  `json:"item"`
+		// function_call_arguments.done's
+		Arguments string `json:"arguments"`
+		Response  struct {
 			ID                string `json:"id"`
 			Model             string `json:"model"`
 			Status            string `json:"status"`
@@ -581,20 +843,33 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KStart, MsgID: ev.Response.ID, Model: ev.Response.Model})
 		}
 	case "response.output_item.added":
+		d.endCall(emit)
 		if ev.Item.Type == "function_call" {
-			d.argsSeen, d.called = false, true
+			d.called, d.calling = true, true
 			emit(Event{Kind: KToolStart, ID: ev.Item.CallID, Name: ev.Item.Name})
 		}
 	case "response.output_text.delta":
+		d.endCall(emit)
 		emit(Event{Kind: KText, Text: ev.Delta})
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		d.endCall(emit)
 		emit(Event{Kind: KThink, Text: ev.Delta})
 	case "response.function_call_arguments.delta":
-		d.argsSeen = true
-		emit(Event{Kind: KToolArgs, Text: ev.Delta})
+		if d.calling {
+			d.args.WriteString(ev.Delta)
+		} else {
+			emit(Event{Kind: KToolArgs, Text: ev.Delta})
+		}
+	case "response.function_call_arguments.done":
+		if d.calling && ev.Arguments != "" {
+			d.full = ev.Arguments
+		}
 	case "response.output_item.done":
-		if ev.Item.Type == "function_call" && !d.argsSeen && ev.Item.Arguments != "" {
-			emit(Event{Kind: KToolArgs, Text: string(ev.Item.Arguments)})
+		if ev.Item.Type == "function_call" {
+			if ev.Item.Arguments != "" {
+				d.full = string(ev.Item.Arguments)
+			}
+			d.endCall(emit)
 		}
 		if a := ev.Item.Action; ev.Item.Type == "web_search_call" && a != nil && a.Query != "" {
 			var hits []Hit
@@ -606,6 +881,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KSearch, Text: a.Query, Hits: hits})
 		}
 	case "response.completed", "response.incomplete", "response.failed":
+		d.endCall(emit)
 		if ev.Response.Error != nil {
 			emit(Event{Kind: KError, Text: ev.Response.Error.Message, Code: refusedCode(data)})
 			return nil
@@ -629,6 +905,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStop, Stop: stop})
 		emit(Event{Kind: KUsage, Usage: ev.Response.Usage.usage()})
 	case "error":
+		d.endCall(emit)
 		msg := ev.Message
 		if ev.Error != nil {
 			msg = ev.Error.Message
@@ -665,6 +942,17 @@ func callTo(item map[string]any, name string, named map[string]nsTool) map[strin
 		args, _ := item["arguments"].(string)
 		delete(item, "name")
 		item["type"], item["execution"], item["arguments"] = "tool_search_call", "client", parseArgs(args)
+	} else if q.Custom {
+		// a custom tool's call carries its free-form input, not arguments
+		args, _ := item["arguments"].(string)
+		delete(item, "arguments")
+		item["type"], item["name"], item["input"] = "custom_tool_call", q.Name, ""
+		if args != "" {
+			item["input"] = customInput(args)
+		}
+		if q.Namespace != "" {
+			item["namespace"] = q.Namespace
+		}
 	} else if q, ok := named[name]; ok {
 		item["name"], item["namespace"] = q.Name, q.Namespace
 		// Nothing magpie serves seals arguments. Codex reads a namespaced call
@@ -678,12 +966,13 @@ func callTo(item map[string]any, name string, named map[string]nsTool) map[strin
 }
 
 // itemPrefix is the prefix of a call item's id, by its type: OpenAI turns
-// away a tool_search_call whose id isn't a tsc_ one ("Invalid
-// 'input[98].id': 'fc_…'. Expected an ID that begins with 'tsc'"), and
-// Codex hands the item back to it when the conversation goes there.
+// away a tool_search_call or custom_tool_call whose id isn't its own kind
+// ("Invalid 'input[98].id': 'fc_…'. Expected an ID that begins with
+// 'tsc'", openaiItemPrefix), and Codex hands the item back to it when the
+// conversation goes there.
 func itemPrefix(item map[string]any) string {
-	if item["type"] == "tool_search_call" {
-		return "tsc_"
+	if t, _ := item["type"].(string); openaiItemPrefix[t] != "" {
+		return openaiItemPrefix[t]
 	}
 	return "fc_"
 }
@@ -753,7 +1042,7 @@ func (e *responsesEncoder) closeItem() {
 			args = "{}"
 		}
 		p := e.col.last(ToolCall)
-		if !e.named[p.Name].Search {
+		if q := e.named[p.Name]; !q.Search && !q.Custom {
 			e.send("response.function_call_arguments.done", callTo(map[string]any{"item_id": e.itemID, "output_index": e.item, "call_id": p.ID, "arguments": args}, p.Name, e.named))
 		}
 		item = callTo(map[string]any{"id": e.itemID, "type": "function_call", "status": "completed", "call_id": p.ID, "arguments": args}, p.Name, e.named)
@@ -814,7 +1103,11 @@ func (e *responsesEncoder) event(ev Event) {
 	case KToolArgs:
 		if e.open == ToolCall && ev.Text != "" {
 			e.text.WriteString(ev.Text)
-			e.send("response.function_call_arguments.delta", map[string]any{"item_id": e.itemID, "output_index": e.item, "delta": ev.Text})
+			// a custom tool's input is whole only once its arguments are:
+			// it goes in the item when that is done
+			if !e.named[e.col.last(ToolCall).Name].Custom {
+				e.send("response.function_call_arguments.delta", map[string]any{"item_id": e.itemID, "output_index": e.item, "delta": ev.Text})
+			}
 		}
 	case KError:
 		e.closeItem()

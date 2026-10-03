@@ -1,9 +1,7 @@
 package edit
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -19,7 +17,7 @@ func GetYAMLTop(path, key string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	root, err := parseYAMLTop(raw)
+	root, _, err := parseYAMLTop(raw)
 	if err != nil || root == nil {
 		return "", false
 	}
@@ -31,8 +29,9 @@ func GetYAMLTop(path, key string) (string, bool) {
 }
 
 // SetYAMLTop sets top-level scalar keys without reformatting other entries.
-// Only a single block mapping can be edited; invalid input or output leaves
-// the file untouched. Missing files are created.
+// Only the first block mapping can be edited, with empty or null trailing
+// documents allowed; invalid input or output leaves the file untouched.
+// Missing files are created.
 func SetYAMLTop(path string, kvs ...KV) error {
 	raw, err := Read(path)
 	if err != nil {
@@ -101,37 +100,20 @@ func yamlTopLiteral(value any) string {
 	return v
 }
 
-// Decode as well as parse: yaml.Node alone accepts duplicate mapping keys.
-// A second document must not silently disappear from the editor's view.
-func parseYAMLTop(raw []byte) (*yaml.Node, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	var doc, extra yaml.Node
-	if err := dec.Decode(&doc); err == io.EOF {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
+// parseYAMLTop requires a mapping root, treating an empty null document as empty.
+// nextLine is the first trailing document's line, or zero when none follows.
+func parseYAMLTop(raw []byte) (root *yaml.Node, nextLine int, err error) {
+	root, nextLine, err = parseYAMLDocuments(raw)
+	if err != nil || root == nil {
+		return nil, nextLine, err
 	}
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("expected a single YAML document")
-		}
-		return nil, err
-	}
-	if len(doc.Content) == 0 {
-		return nil, nil
-	}
-	root := doc.Content[0]
 	if root.Kind == yaml.ScalarNode && root.Tag == "!!null" && root.Value == "" {
-		return nil, nil
+		return nil, nextLine, nil
 	}
 	if root.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("line %d: top level is not a YAML mapping", root.Line)
+		return nil, 0, fmt.Errorf("line %d: top level is not a YAML mapping", root.Line)
 	}
-	var decoded any
-	if err := root.Decode(&decoded); err != nil {
-		return nil, err
-	}
-	return root, nil
+	return root, nextLine, nil
 }
 
 type yamlTopEntry struct {
@@ -142,13 +124,16 @@ type yamlTopEntry struct {
 // The next parsed key bounds an entry, even when its value contains key-like
 // lines or a flow collection whose closing bracket is at column zero.
 func yamlTopEntries(lines []string) ([]yamlTopEntry, int, string, error) {
-	root, err := parseYAMLTop([]byte(strings.Join(lines, "\n")))
+	root, nextLine, err := parseYAMLTop([]byte(strings.Join(lines, "\n")))
 	if err != nil {
 		return nil, 0, "", err
 	}
 	end := len(lines)
 	if lines[end-1] == "" {
 		end-- // splitLines' final empty element is not another physical line.
+	}
+	if nextLine > 0 {
+		end = nextLine - 1 // Edits belong before the empty/null trailing documents.
 	}
 	// Keep an explicit document terminator and the comments following it.
 	for i := end - 1; i >= 0; i-- {
@@ -233,7 +218,7 @@ func sameYAMLValue(a, b *yaml.Node) bool {
 
 func writeYAMLTop(path string, lines []string) error {
 	raw := []byte(joinLines(lines))
-	if _, err := parseYAMLTop(raw); err != nil {
+	if _, _, err := parseYAMLTop(raw); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	return WriteAtomic(path, raw)

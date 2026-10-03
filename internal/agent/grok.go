@@ -16,7 +16,6 @@ package agent
 // gives them back.
 
 import (
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,13 +31,15 @@ var grokEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", 
 // grokModelTable is the header prefix of every table magpie writes.
 var grokModelTable = `model."` + magpieID + "/"
 
-func grokModelTables() []edit.Table {
+// grokModelTables are magpie's model tables, for a Grok that reaches the
+// gateway's /v1 at v1.
+func grokModelTables(v1 string) []edit.Table {
 	var out []edit.Table
 	for _, m := range magpieModels("grok") {
 		kvs := []edit.KV{
 			{Path: "model", Value: m.ID},
 			{Path: "name", Value: m.Name},
-			{Path: "base_url", Value: gatewayV1()},
+			{Path: "base_url", Value: v1},
 			{Path: "api_key", Value: gateway.Token},
 			{Path: "api_backend", Value: "chat_completions"},
 		}
@@ -59,10 +60,15 @@ func grokModelTables() []edit.Table {
 	return out
 }
 
-func grok(home string) *Agent {
-	dir := os.Getenv("GROK_HOME")
+func grok(home string) *Agent { return grokIn(here(home)) }
+
+// grokIn is Grok Build at a place: this machine's home, or a WSL distro's
+// (see wsl.go), where GROK_HOME isn't read and its models name the gateway
+// as the distro reaches it.
+func grokIn(at place) *Agent {
+	dir := at.getenv("GROK_HOME")
 	if dir == "" {
-		dir = filepath.Join(home, ".grok")
+		dir = filepath.Join(at.home, ".grok")
 	}
 	path := filepath.Join(dir, "config.toml")
 	get := func(k string) (string, error) {
@@ -81,7 +87,7 @@ func grok(home string) *Agent {
 		}
 		return false, nil
 	}
-	writeMagpie := func() error { return edit.SetTOMLTables(path, []string{grokModelTable}, grokModelTables()) }
+	writeMagpie := func() error { return edit.SetTOMLTables(path, []string{grokModelTable}, grokModelTables(at.v1())) }
 	dropMagpie := func() error { return edit.SetTOMLTables(path, []string{grokModelTable}, nil) }
 	// the default model is the user's, not a campaign's
 	ownDefault := func(features map[string]string) error {
@@ -144,7 +150,7 @@ func grok(home string) *Agent {
 				return "Grok Build's [model." + strconv.Quote(v) + "] (config.toml) is gone, so it no longer reaches magpie"
 			}
 			return wiringOff("Grok Build", path, func(k string) (string, bool) { v, ok := t[k]; return v, ok },
-				"base_url", gatewayV1(), "api_key", gateway.Token)
+				"base_url", at.v1(), "api_key", gateway.Token)
 		},
 		Fields: []Field{
 			{
@@ -188,7 +194,14 @@ func grok(home string) *Agent {
 					return edit.SetTOMLKey(path, "models", "default", v)
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(grokOwnOptions(cur["model"]), viaMagpie("grok", magpieID+"/")...)
+					// magpie's rows for the account Grok Build is signed in
+					// to are its own models a second time: they fold into
+					// one row (Fate on Discord: grokbuild 在登录态下会加载重复的模型)
+					opts := viaMagpie("grok", magpieID+"/")
+					for i := range opts {
+						opts[i].Same = opts[i].own
+					}
+					return append(grokOwnOptions(cur["model"]), opts...)
 				},
 			},
 			{

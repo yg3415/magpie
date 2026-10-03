@@ -8,7 +8,12 @@
 // head is in sight and, scrolled back up, takes the view down to it again.
 // And a dialog opened and closed over the page keeps every logo it drew (a
 // logo made afresh loads again and blinks: 每次打开或者关闭弹窗的时候，
-// Provider的logo都会重新刷新一遍). No backend, the API is faked here.
+// Provider的logo都会重新刷新一遍). Closed, by its Close or Escape, the sheet
+// leaves no blank under the list: the page held on to the Close clicked and
+// kept the sheet's height as empty room (#433, which made the sheet a dialog
+// over the list instead; the owner wants it unrolling under the list, a
+// dialog over it being a second layer under the editor's). No backend, the
+// API is faked here.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -84,6 +89,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         s = await at();
         assert(s.top >= s.end - 1, "scrolled to the end");
         assert(Math.abs(s.bar) <= 1, "the bar at the end: " + s.bar);
+        const full = await page.evaluate(() => document.querySelector("#view-providers").scrollHeight);
+        // closed, the list ends at the view's foot as it did: no room kept
+        const closed = async (how) => {
+          await page.locator("#addSheet").waitFor({ state: "hidden" });
+          await page.waitForTimeout(500);
+          const c = await page.evaluate(() => {
+            const v = document.querySelector("#view-providers");
+            return { room: !!v.querySelector(".view-room"), height: v.scrollHeight, top: v.scrollTop, end: v.scrollHeight - v.clientHeight };
+          });
+          assert.deepEqual(c, { room: false, height: full, top: c.end, end: c.end }, how + " left a blank under the list");
+        };
 
         // one click: the sheet opens and the view goes down to it
         await page.locator("#addProvider").click();
@@ -111,6 +127,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#modal").waitFor({ state: "hidden" });
         assert.equal(await page.locator("#providers .ic[data-was], #addSheet .ic[data-was]").count(), count, "every logo kept as it closed");
         assert.equal(await page.locator("#providers .ic:not([data-was]), #addSheet .ic:not([data-was])").count(), 0);
+
+        // its Close, twice over, and Escape each close it with no blank left
+        await page.locator("#addSheet .row-head button").last().click();
+        await closed("Close");
+        assert(await page.locator("#addProvider").evaluate((e) => e === document.activeElement), "the focus goes back to Add provider");
+        await page.locator("#addProvider").click();
+        await page.waitForFunction(reached, null, { timeout: 3000 });
+        await page.locator("#addSheet .row-head button").last().click();
+        await closed("a second Close");
+        await page.locator("#addProvider").click();
+        await page.waitForFunction(reached, null, { timeout: 3000 });
+        await page.locator("#addSheet .find").focus();
+        await page.keyboard.press("Escape");
+        await closed("Escape");
+        // it never was a dialog over the list
+        assert.equal(await page.locator("#addBackdrop").count(), 0);
         assert.deepEqual(errors, []);
       });
     }

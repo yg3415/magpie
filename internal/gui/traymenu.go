@@ -3,16 +3,20 @@ package gui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/yetone/magpie/internal/gateway"
 )
 
 // trayZh is the tray menu in Chinese; the page has its own words
 // (i18n.js), and these few are all the menu shows (#301).
 var trayZh = map[string]string{
-	"Open magpie":             "打开 magpie",
-	"Version %s":              "版本 %s",
-	"Restart to Update":       "重启以更新",
-	"Restart to Update to %s": "重启以更新到 %s",
-	"Quit magpie":             "退出 magpie",
+	"Open magpie":                          "打开 magpie",
+	"Version %s":                           "版本 %s",
+	"Restart to Update":                    "重启以更新",
+	"Restart to Update to %s":              "重启以更新到 %s",
+	"Quit magpie":                          "退出 magpie",
+	"Restart Now to Update":                "立即重启以更新",
+	"Restart Now to Update (%d in flight)": "立即重启以更新（%d 个进行中）",
 }
 
 // onLang relabels the tray menu when the Settings page changes the
@@ -61,6 +65,16 @@ func trayMenuLabels(lang, version, update string) trayLabels {
 		l.restart = trayText(lang, "Restart to Update to %s", update)
 	}
 	return l
+}
+
+// trayRestartNow is the restart item while a restart waits for the
+// gateway (#577): a click restarts at once, cutting short what b has in
+// flight.
+func trayRestartNow(lang string, b gateway.Busy) string {
+	if n := b.Requests + b.Tools; n > 0 {
+		return trayText(lang, "Restart Now to Update (%d in flight)", n)
+	}
+	return trayText(lang, "Restart Now to Update")
 }
 
 // envLang is the language the environment names: the first of LC_ALL,

@@ -27,6 +27,19 @@ func TestClaudeStandIn(t *testing.T) {
 			t.Errorf("%s: %q, want %q", asked, got, want)
 		}
 	}
+	// every version of a family is its tier's; the main model, named by
+	// its own id, is the main model's
+	write(`{"env":{"ANTHROPIC_BASE_URL":"` + gateway.URL() + `","ANTHROPIC_MODEL":"claude-opus-5[1m]","ANTHROPIC_DEFAULT_OPUS_MODEL":"a/big:high[1m]","ANTHROPIC_DEFAULT_SONNET_MODEL":"a/mid","ANTHROPIC_DEFAULT_FABLE_MODEL":"a/fab[1m]"}}`)
+	for asked, want := range map[string]string{
+		"claude-opus-5":              "claude-opus-5[1m]",
+		"claude-opus-5-5":            "a/big:high[1m]",
+		"claude-sonnet-5-5-20261001": "a/mid",
+		"claude-fable-5-1[1m]":       "a/fab[1m]",
+	} {
+		if got := claudeStandIn(path, asked); got != want {
+			t.Errorf("%s: %q, want %q", asked, got, want)
+		}
+	}
 	// Claude Code on Anthropic's own endpoint: nothing stands in
 	write(`{"env":{"ANTHROPIC_MODEL":"a/main"}}`)
 	if got := claudeStandIn(path, "claude-haiku-4-5"); got != "" {

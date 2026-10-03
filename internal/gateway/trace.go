@@ -162,6 +162,8 @@ type Weighed struct {
 	Learns   bool              `json:"learns,omitempty"` // not known, but its answer will tell
 	Used     float64           `json:"used"`             // share of the allowance counting the model, used
 	Renews   []time.Time       `json:"renews,omitempty"` // when those windows renew, the biggest first
+	Pace     float64           `json:"pace,omitempty"`   // weekly pace: share of its week left per hour until it renews
+	Due      *time.Time        `json:"due,omitempty"`    // weekly pace: when the window that pace went by renews
 	Tokens   float64           `json:"tokens,omitempty"` // least used: tokens it served lately
 	Turn     bool              `json:"turn,omitempty"`   // in turn: it was this one's turn
 	Fit      int               `json:"fit,omitempty"`    // keyFit
@@ -212,6 +214,9 @@ type Try struct {
 	Error   string `json:"error,omitempty"`
 	Rest    *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
 	Again   int64  `json:"again,omitempty"` // ms waited before it was tried again, the last one left
+	// Queued: ms it waited for one of its key's or account's slots, the
+	// provider's MaxConcurrency out already (concurrency.go)
+	Queued int64 `json:"queued,omitempty"`
 	// Reset: its week used up and nobody else left, one of the account's
 	// Codex resets was spent by itself (the user's setting) — on Who, and
 	// what spending it did — and the request asked again
@@ -250,7 +255,11 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 		w.Kind = "provider"
 	}
 	if l, ok := wg.lefts[c.allowanceKey()]; ok {
-		w.Known, w.Used, w.Renews = true, l.used, l.renews
+		w.Known, w.Used, w.Renews, w.Pace = true, l.used, l.renews, l.pace
+		if !l.due.IsZero() {
+			due := l.due
+			w.Due = &due
+		}
 	} else if wg.lefts != nil {
 		w.Learns = learns(c, wg.lefts)
 	}
@@ -346,7 +355,7 @@ func (t *trace) update(r *Route, f func(r *Route)) {
 				t.totals.Rerouted++
 			}
 		}
-		if r.Status >= 400 {
+		if r.Status >= 400 || r.Error != "" {
 			t.totals.Errors++
 		}
 		if keepRoutes {

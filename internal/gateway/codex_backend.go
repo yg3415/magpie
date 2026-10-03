@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -64,11 +65,11 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 	// newer: the backend serves a model only to a client that knows it
 	provider.SawCodexClient(r.Header)
 	rest := strings.TrimPrefix(r.URL.Path, CodexPath)
-	body, err := codexBody(r)
-	if err != nil {
-		writeError(w, provider.Responses, 400, err.Error())
+	body, ok := s.readRequestBody(w, r, provider.Responses, codexReader, 0)
+	if !ok {
 		return
 	}
+	var err error
 	switch {
 	case r.Method == http.MethodGet && rest == "/models":
 		s.codexModels(w, r)
@@ -87,10 +88,8 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 				writeError(w, provider.Responses, 400, "/responses/compact is not supported for Magpie models; use a compaction_trigger on /responses")
 				return
 			}
-			if hasSealedAgentMessage(body) {
-				writeError(w, provider.Responses, 400, "An OpenAI lead sent a sealed subagent task that a Magpie-served model cannot read. Use a Magpie-served model for the lead, or choose an OpenAI subagent.")
-				return
-			}
+			// a sealed subagent task goes to a ChatGPT account the model
+			// or group has, or is turned away (serve, sealedReader)
 			body, compact := codexInput(body, true)
 			if compact {
 				s.codexCompact(w, r, body)
@@ -99,7 +98,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			s.serve(w, r, provider.Responses, body)
 			return
 		}
-		body = searchCallIDs(body)
+		body = callItemIDs(body)
 		if rest == "/responses/compact" {
 			break // preserve native compaction's existing passthrough
 		}
@@ -115,6 +114,69 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.codexUpstream(w, r, rest, body)
+}
+
+// sealedTaskError is what a subagent is told whose task its lead sealed
+// when nothing model names can read it.
+func sealedTaskError(model string) string {
+	return fmt.Sprintf("An OpenAI lead sent a sealed subagent task that only a ChatGPT account can read, and %s has none. Use a Magpie-served model for the lead, or choose an OpenAI subagent (or a group with a Codex account in it).", model)
+}
+
+// sealedReader is who can read a subagent's task its lead sealed: a
+// ChatGPT account (#619). The ChatGPT backend seals spawn_agent's message
+// for a lead it answers as it came (passthrough, a Codex account a group
+// has as well), and only it opens it again.
+func sealedReader(p provider.Provider) bool {
+	return p.Account != nil && p.Account.Agent == "codex"
+}
+
+// sealedReaders keeps of cands those that can read a sealed subagent task,
+// pl's order with them.
+func sealedReaders(cands []candidate, pl planned) ([]candidate, planned) {
+	var kept []candidate
+	var order []Weighed
+	for i, c := range cands {
+		if sealedReader(c.p) {
+			kept = append(kept, c)
+			order = append(order, pl.order[i])
+		}
+	}
+	cands, pl.order = kept, order
+	return cands, pl
+}
+
+// leadFirst puts first the account that answered the lead, the thread
+// parent names, in scope: the one that sealed its subagent's task, which
+// another account may not open, as it doesn't another's reasoning.
+func leadFirst(scope, parent string, cands []candidate, pl planned) ([]candidate, planned) {
+	parent = strings.TrimSpace(parent)
+	if parent == "" {
+		return cands, pl
+	}
+	sticks.Lock()
+	st, had := stickOf(scope + "|" + parent)
+	if !had {
+		// a group with rules keeps the lead's conversation under its
+		// first words too
+		for k, v := range sticks.m {
+			if strings.HasPrefix(k, scope+"|") && strings.HasSuffix(k, "|"+parent) {
+				st, had = v, true
+				break
+			}
+		}
+	}
+	sticks.Unlock()
+	if !had || time.Since(st.at) > stickKeep {
+		return cands, pl
+	}
+	for i, c := range cands {
+		if i > 0 && c.who() == st.who {
+			cands = append(append([]candidate{c}, cands[:i]...), cands[i+1:]...)
+			pl.order = append(append([]Weighed{pl.order[i]}, pl.order[:i]...), pl.order[i+1:]...)
+			break
+		}
+	}
+	return cands, pl
 }
 
 // Only native sealed agent tasks need this guidance. Other encrypted_content
@@ -149,19 +211,16 @@ func hasSealedAgentMessage(body []byte) bool {
 	return false
 }
 
-// codexBody reads a request's body as it was before Codex compressed it
-// (zstd, for the ChatGPT backend), so it can be read and passed on plain.
-func codexBody(r *http.Request) ([]byte, error) {
-	var rd io.Reader = r.Body
+func codexReader(r *http.Request) (io.ReadCloser, error) {
+	var rd io.ReadCloser = io.NopCloser(r.Body)
 	switch enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc {
 	case "", "identity":
 	case "zstd":
-		d, err := zstd.NewReader(r.Body)
+		d, err := zstd.NewReader(r.Body, zstd.WithDecoderMaxMemory(defaultBodyLimit))
 		if err != nil {
 			return nil, err
 		}
-		defer d.Close()
-		rd = d
+		rd = d.IOReadCloser()
 	case "gzip":
 		g, err := gzip.NewReader(r.Body)
 		if err != nil {
@@ -172,7 +231,7 @@ func codexBody(r *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("magpie can't read a %s body", enc)
 	}
 	r.Header.Del("Content-Encoding")
-	return io.ReadAll(rd)
+	return rd, nil
 }
 
 // codexAccounts is what a request for one of Codex's own models is served
@@ -597,9 +656,17 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
+// codexModelsWait is how long the ChatGPT backend is given for its model
+// list. Codex gives the whole request 5 s (MODELS_REFRESH_TIMEOUT in its
+// models endpoint) and then keeps the list it was built with, magpie's
+// models nowhere in it; a backend slow to answer, or not reachable at all
+// on a network that drops chatgpt.com's packets rather than refusing
+// them, held magpie's answer past that (#539). A var so tests can say.
+var codexModelsWait = 3 * time.Second
+
 // codexModels is the ChatGPT backend's model list for this sign-in, with
-// magpie's models after it. Should the backend not answer, Codex's last
-// list of its own stands in.
+// magpie's models after it. Should the backend not answer, or not in
+// time, Codex's last list of its own stands in.
 func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 	var own []any
 	etag := ""
@@ -607,7 +674,9 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 	if r.URL.RawQuery != "" {
 		u += "?" + r.URL.RawQuery
 	}
-	if req, err := http.NewRequestWithContext(provider.ViaSignedIn(r.Context(), "codex"), http.MethodGet, u, nil); err == nil {
+	ctx, cancel := context.WithTimeout(provider.ViaSignedIn(r.Context(), "codex"), codexModelsWait)
+	defer cancel()
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil); err == nil {
 		copyHeaders(req.Header, r.Header)
 		req.Header.Del("Accept-Encoding")
 		if res, err := s.client.Do(req); err == nil {
@@ -752,16 +821,24 @@ func codexInput(body []byte, magpieModel bool) (_ []byte, compact bool) {
 	return nb, compact
 }
 
-// searchCallIDs is a Responses request whose tool_search_call items have
-// ids OpenAI takes. A vendor's reply that magpie, or the vendor, gave the
-// call as a function_call's (fc_…) came back to Codex as Codex's
-// tool_search_call with that id, and Codex hands it back on every later
-// turn: OpenAI's own models and the ChatGPT backend turn the whole request
-// away ("Invalid 'input[98].id': 'fc_…'. Expected an ID that begins with
-// 'tsc'"), Codex's compaction with it. Such an id goes as a tsc_ one; the
-// rest of the request goes byte for byte.
-func searchCallIDs(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"tool_search_call"`)) {
+// openaiItemPrefix is the id prefix OpenAI takes for each kind of call item
+// a vendor's reply may have handed Codex with another: magpie, or the
+// vendor, gave a tool search's and a custom tool's call a function_call's
+// id (fc_…), and Codex hands the item back on every later turn. OpenAI's
+// own models and the ChatGPT backend turn the whole request away ("Invalid
+// 'input[98].id': 'fc_…'. Expected an ID that begins with 'tsc'", "…with
+// 'ctc'"), Codex's compaction with it.
+var openaiItemPrefix = map[string]string{
+	"tool_search_call": "tsc_",
+	"custom_tool_call": "ctc_",
+}
+
+// callItemIDs is a Responses request whose call items have ids OpenAI
+// takes (openaiItemPrefix): fc_X goes as tsc_X or ctc_X, the call_id the
+// call's output names it by as it was, and the rest of the request byte
+// for byte.
+func callItemIDs(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"tool_search_call"`)) && !bytes.Contains(body, []byte(`"custom_tool_call"`)) {
 		return body
 	}
 	var q map[string]json.RawMessage
@@ -775,17 +852,18 @@ func searchCallIDs(body []byte) []byte {
 	changed := false
 	for i, raw := range items {
 		var it map[string]json.RawMessage
-		if json.Unmarshal(raw, &it) != nil || string(it["type"]) != `"tool_search_call"` {
+		var typ, id string
+		if json.Unmarshal(raw, &it) != nil || json.Unmarshal(it["type"], &typ) != nil {
 			continue
 		}
-		var id string
-		if json.Unmarshal(it["id"], &id) != nil || id == "" || strings.HasPrefix(id, "tsc_") {
+		prefix := openaiItemPrefix[typ]
+		if prefix == "" || json.Unmarshal(it["id"], &id) != nil || id == "" || strings.HasPrefix(id, prefix) {
 			continue
 		}
 		if _, rest, ok := strings.Cut(id, "_"); ok && rest != "" {
-			id = "tsc_" + rest
+			id = prefix + rest
 		} else {
-			id = "tsc_" + id
+			id = prefix + id
 		}
 		it["id"], _ = json.Marshal(id)
 		if b, err := marshalPlain(it); err == nil {

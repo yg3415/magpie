@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/agentenv"
 )
 
 var callT0 = time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
@@ -18,11 +20,14 @@ func setupCalls(t *testing.T) callDirs {
 	t.Helper()
 	dir := t.TempDir()
 	d := callDirs{filepath.Join(dir, "claude"), filepath.Join(dir, "codex"), filepath.Join(dir, "desktop")}
+	for _, k := range agentenv.Vars {
+		t.Setenv(k, "")
+	}
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
 	t.Setenv("CLAUDE_CONFIG_DIR", d.claude)
 	t.Setenv("CODEX_HOME", d.codex)
-	t.Setenv("DSH_HOME", "")
+
 	t.Setenv("HOME", filepath.Join(dir, "home"))
 	t.Setenv("USERPROFILE", filepath.Join(dir, "home"))
 	callDesktopDirs = func() []string { return []string{d.desktop} }
@@ -209,7 +214,8 @@ func TestCallsCodex(t *testing.T) {
 		{Time: callT0.Add(200 * time.Second), Agent: "codex", Session: "0190cccc-1111-7222-8333-444455556666", Tokens: Tokens{6, 3, 4, 0}},
 		{Time: callT0.Add(103 * time.Second), Agent: "codex", Session: "thread-2", Model: "gpt-6-astra", Tokens: Tokens{500, 20, 0, 0}, Reasoning: 5, Effort: "medium", Cwd: "/work/it", Millis: 1000},
 		{Time: callT0.Add(102 * time.Second), Agent: "codex", Session: "thread-2", Model: "gpt-6-astra", Tokens: Tokens{100, 100, 3900, 0}, Reasoning: 30, Effort: "medium", Cwd: "/work/it", Millis: 1000},
-		{Time: callT0.Add(12 * time.Second), Agent: "codex", Session: "sess-x", Model: "gpt-6-luna", Tokens: Tokens{500, 150, 2000, 300}, Reasoning: 40, Effort: "low", Cwd: "/work/it", Millis: 1000},
+		// input_tokens holds the cache write as well as the read (#589): 2500 - 2000 - 300
+		{Time: callT0.Add(12 * time.Second), Agent: "codex", Session: "sess-x", Model: "gpt-6-luna", Tokens: Tokens{200, 150, 2000, 300}, Reasoning: 40, Effort: "low", Cwd: "/work/it", Millis: 1000},
 		{Time: callT0.Add(11 * time.Second), Agent: "codex", Session: "sess-x", Model: "gpt-6-luna", Tokens: Tokens{1000, 100, 1000, 0}, Reasoning: 40, Effort: "low", Cwd: "/work/it", Millis: 1000},
 		{Time: callT0.Add(2 * time.Second), Agent: "codex", Session: "sess-x", Model: "gpt-6-astra", Tokens: Tokens{400, 50, 600, 0}, Reasoning: 20, Effort: "high", Cwd: "/work/it", TTFT: 700, Millis: 5000},
 	}

@@ -2,8 +2,10 @@
 // A Plugins card that offers a built-in's accounts keeps its button inside
 // the card: "Move my Grok (SuperGrok) accounts (1)" ran past the card's right
 // edge, and Kiro's shorter one squeezed its name to "K…" and cut "magpie
-// community". The button now has a row of its own at the card's foot and
-// says how many accounts it moves ("Move my 1 Grok (SuperGrok) account").
+// community". It then had a solid row of its own at the card's foot, which
+// broke onto two lines ("Move my 2 Command Code Plan accounts"); it is now
+// one word beside the name, as Install is ("Move"), its title saying whose
+// accounts and how many, and stays on one line.
 // Every card stays whole, its name and byline uncut, in a three-, two- and
 // one-column window. In English and Chinese; the API is faked here.
 const assert = require("node:assert/strict");
@@ -46,7 +48,7 @@ function serve(lang) {
   };
 }
 
-const card = { en: "Move my 1 Grok (SuperGrok) account", zh: "迁移我的 1 个 Grok (SuperGrok) 账号" };
+const card = { en: "Move", zh: "迁移" };
 const launch = (engine) => engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" });
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -61,7 +63,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang));
         await page.goto("http://magpie.test/?view=plugins");
-        await page.locator("#view-plugins button", { hasText: card[lang] }).waitFor();
+        await page.locator("#view-plugins button", { hasText: card[lang] }).first().waitFor();
         if (process.env.ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `plugin-move-overflow-${engine}-${lang}-${width}.png`) });
 
         const cards = await page.locator("#view-plugins .pm-card").evaluateAll((cs) => cs.map((c) => {
@@ -74,6 +76,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           return { name: c.querySelector(".pm-name b")?.textContent, out, cut };
         }));
         assert.ok(cards.length >= listings.length, "the market's cards aren't there");
+        // the move is one line, in the card's top row
+        const moves = await page.locator("#view-plugins .pm-card .pm-act.move").evaluateAll((bs) => bs.map((b) => [b.parentElement.className, Math.round(b.getBoundingClientRect().height)]));
+        assert.ok(moves.length >= 1);
+        for (const [row, h] of moves) { assert.equal(row, "pm-top"); assert.equal(h, 26, "one line"); }
         const lefts = await page.locator("#view-plugins .pm-card").evaluateAll((cs) => new Set(cs.map((c) => Math.round(c.getBoundingClientRect().left))).size);
         assert.equal(lefts, cols, `not ${cols} columns at ${width}px`);
         const wrong = cards.flatMap((c) => [...(c.out.length ? [`${c.name}: runs past its card`] : []), ...c.cut.map((x) => `${c.name}: "${x}" is cut`)]);

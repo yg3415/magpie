@@ -7,9 +7,13 @@
 // window does, and opens its links in a tab. #464 links the issue and opens it in
 // the browser through the app, as markdown links do; a javascript: link is
 // text, and HTML in the notes is shown as text, never run. Settings' What's new
-// row, under Version, opens them again, the waiting update's first. No click moves the
-// page, no left-border accent. In English and Chinese, Chromium and WebKit;
-// the API is faked.
+// row, under Version, opens them again, the waiting update's first. The
+// dialog shown by itself has "Don't show again today" (#525), posted to
+// whatsnew/today as it changes; Settings' has none. No click moves the
+// page, no left-border accent. The notes and the waiting update are asked
+// for in the page's language (freecss on Discord: the notes should follow
+// Settings' language). In English and Chinese, Chromium and WebKit; the API
+// is faked.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -58,6 +62,9 @@ function serve(lang, ctl) {
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);
+    if (url.pathname === "/api/update" || url.pathname === "/api/whatsnew" || url.pathname === "/api/update/check") {
+      (ctl.langs ||= []).push(url.pathname + " " + url.searchParams.get("lang"));
+    }
     if (url.pathname === "/api/update") return json(ctl.update);
     if (url.pathname === "/api/whatsnew") {
       const all = url.searchParams.has("all");
@@ -66,6 +73,7 @@ function serve(lang, ctl) {
       return json({ show, current: "0.1.604", releases: show || (all && ctl.upgraded) ? RELEASES : all ? [RELEASES[0]] : [] });
     }
     if (url.pathname === "/api/whatsnew/seen") { ctl.seen++; return route.fulfill({ status: 204 }); }
+    if (url.pathname === "/api/whatsnew/today") { (ctl.today ||= []).push(req.postDataJSON().on); return route.fulfill({ status: 204 }); }
     if (url.pathname === "/api/open") { ctl.opened.push(req.postDataJSON().url); return route.fulfill({ status: 204 }); }
     if (url.pathname.startsWith("/api/")) return json({});
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
@@ -75,8 +83,8 @@ function serve(lang, ctl) {
 }
 
 const words = {
-  en: { title: "What's new in v0.1.604", pendingTitle: "What's new in v0.1.605", close: "Close", again: "What's new", open: "Open", pending: "Not installed yet" },
-  zh: { title: "v0.1.604 更新内容", pendingTitle: "v0.1.605 更新内容", close: "关闭", again: "更新内容", open: "打开", pending: "尚未安装" },
+  en: { quiet: "Don't show again today", title: "What's new in v0.1.604", pendingTitle: "What's new in v0.1.605", close: "Close", again: "What's new", open: "Open", pending: "Not installed yet" },
+  zh: { quiet: "今天不再弹出", title: "v0.1.604 更新内容", pendingTitle: "v0.1.605 更新内容", close: "关闭", again: "更新内容", open: "打开", pending: "尚未安装" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -176,6 +184,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await page.evaluate(() => window.__pwned), undefined, "nothing in the notes ran");
       const border = await page.evaluate(() => [...document.querySelectorAll("#modal .whatsnew, #modal .whatsnew *")].map((e) => getComputedStyle(e).borderLeftWidth).filter((b) => parseFloat(b) > 1));
       assert.deepEqual(border, [], "no left-border accent");
+      // #525: "Don't show again today", told to the app as it is ticked
+      // or unticked, and moving nothing
+      const quiet = dialog(page).getByRole("checkbox", { name: w.quiet });
+      assert.equal(await quiet.isChecked(), false);
+      const at0 = await body.evaluate((e) => [e.scrollTop, document.scrollingElement.scrollTop]);
+      await quiet.click();
+      for (let i = 0; i < 40 && !ctl.today; i++) await page.waitForTimeout(25);
+      assert.deepEqual(ctl.today, [true]);
+      await dialog(page).getByText(w.quiet).click();
+      for (let i = 0; i < 40 && ctl.today.length < 2; i++) await page.waitForTimeout(25);
+      assert.deepEqual(ctl.today, [true, false]);
+      await quiet.click();
+      for (let i = 0; i < 40 && ctl.today.length < 3; i++) await page.waitForTimeout(25);
+      assert.deepEqual(ctl.today, [true, false, true]);
+      assert.deepEqual(await body.evaluate((e) => [e.scrollTop, document.scrollingElement.scrollTop]), at0, "the tick moved the page");
       // dismissed: Close, and Escape on the next one
       await dialog(page).getByRole("button", { name: w.close }).click();
       await page.locator("#modal").waitFor({ state: "hidden" });
@@ -211,10 +234,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await dialog(page).locator(".wn-rel").first().locator(".badge").textContent(), w.pending);
       assert.equal(ctl.asked.at(-1), "all");
       assert.equal(ctl.seen, 1, "asking again isn't a first showing");
+      assert.equal(await dialog(page).getByRole("checkbox").count(), 0, "Settings' notes have no \"don't show again today\"");
+      // every ask names the page's language
+      assert(ctl.langs.some((l) => l.startsWith("/api/whatsnew ")) && ctl.langs.some((l) => l.startsWith("/api/update ")), ctl.langs.join());
+      assert.deepEqual(ctl.langs.filter((l) => !l.endsWith(" " + lang)), [], "asked without the page's language");
       await page.keyboard.press("Escape");
       await page.locator("#modal").waitFor({ state: "hidden" });
 
-      const missing = await page.evaluate(() => ["What's new", "What's new in {v}", "The release notes since the last update", "Not installed yet", "Couldn't load the release notes"].filter((k) => !I18N.zh[k]));
+      const missing = await page.evaluate(() => ["What's new", "What's new in {v}", "The release notes since the last update", "Not installed yet", "Couldn't load the release notes", "Don't show again today"].filter((k) => !I18N.zh[k]));
       assert.deepEqual(missing, [], "every string has its Chinese");
       assert.deepEqual(errors, []);
     });

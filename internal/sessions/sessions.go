@@ -2,7 +2,7 @@
 // files — Claude Code's projects/*/<id>.jsonl (and Qoder's, the same kind),
 // Codex's rollout files, OpenCode's database (or its older JSON files) and
 // ZCode's, Pi's session files and omp's, DeepSeek Harness's, Cline's, Grok
-// Build's and WorkBuddy's — with the tokens each spent, what that cost at the
+// Build's, WorkBuddy's and Cursor CLI's chat stores — with the tokens each spent, what that cost at the
 // effective price, and the command that resumes it. It only ever reads the
 // agents' folders.
 //
@@ -69,13 +69,14 @@ type Model struct {
 
 // Session is one agent session.
 type Session struct {
-	Agent  string    `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy
-	ID     string    `json:"id"`
-	Cwd    string    `json:"cwd"`
-	Title  string    `json:"title"` // the first prompt, else the agent's own title
-	Start  time.Time `json:"start"`
-	Last   time.Time `json:"last"`
-	Models []Model   `json:"models"`
+	ReadOnly bool      `json:"read_only,omitempty"`
+	Agent    string    `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy, cursor, hermes
+	ID       string    `json:"id"`
+	Cwd      string    `json:"cwd"`
+	Title    string    `json:"title"` // the first prompt, else the agent's own title
+	Start    time.Time `json:"start"`
+	Last     time.Time `json:"last"`
+	Models   []Model   `json:"models"`
 	Tokens
 	Cost     float64 `json:"cost"`     // USD at the effective price, for the priced models
 	Unpriced int     `json:"unpriced"` // models that spent tokens but have no known price
@@ -93,6 +94,7 @@ const Limit = 200
 
 // state is what one file's parse has come to, enough to read on from Off.
 type state struct {
+	DBRevision  string            `json:"db_revision,omitempty"`
 	Head        string            `json:"head,omitempty"`
 	HeadSize    int               `json:"head_size,omitempty"`
 	ContentHash string            `json:"content_hash,omitempty"`
@@ -291,6 +293,8 @@ type file struct {
 	// Cline: the session's manifest, beside its messages; Grok Build: its
 	// summary.json, beside its updates
 	manifest string
+	hermes   *hermesDB
+	readOnly bool
 }
 
 // ClaudeDir is Claude Code's folder: $CLAUDE_CONFIG_DIR, else ~/.claude.
@@ -361,7 +365,7 @@ func allFiles() []file {
 	var out []file
 	for _, fs := range [][]file{callFiles(), openCodeFiles(), piFiles(),
 		zcodeFiles(), dshFiles(), clineFiles(), ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")),
-		grokFiles(), workbuddyFiles(), ompFiles()} {
+		grokFiles(), workbuddyFiles(), ompFiles(), cursorFiles(), hermesFiles()} {
 		out = append(out, fs...)
 	}
 	return out
@@ -382,11 +386,13 @@ func Dirs() []string {
 		{GrokDir(), filepath.Join(GrokDir(), "sessions")},
 		{WorkBuddyDir(), filepath.Join(WorkBuddyDir(), "projects")},
 		{OmpDir(), filepath.Join(OmpDir(), "sessions")},
+		{CursorDir(), filepath.Join(CursorDir(), "chats")},
 	} {
 		if _, err := os.Stat(d.sessions); err == nil {
 			out = append(out, d.dir)
 		}
 	}
+	out = append(out, HermesDirs()...)
 	return out
 }
 
@@ -467,7 +473,8 @@ func CachePath() string { return filepath.Join(filepath.Dir(catalog.CachePath())
 // 8: keep only summaries here; request metadata has per-file shards.
 // 9: validate the previous full prefix before treating growth as an append.
 // 10: Pi's and omp's prompts, replies, tool calls and skills.
-const cacheVersion = 10
+// 11: Codex's input without what it wrote to the cache (#589).
+const cacheVersion = 11
 
 type cacheFile struct {
 	Version int               `json:"version"`
@@ -591,7 +598,7 @@ func writeCache(c *save) {
 func refresh(want, all []file) {
 	var todo []file
 	for _, f := range want {
-		if s := cache[f.path]; s == nil || s.Size != f.size || s.Mod != f.mod.UnixNano() {
+		if s := cache[f.path]; s == nil || s.Size != f.size || s.Mod != f.mod.UnixNano() || (f.agent == "hermes" && (f.hermes == nil || f.hermes.revision == "" || s.DBRevision != f.hermes.revision)) {
 			todo = append(todo, f)
 		}
 	}
@@ -823,6 +830,9 @@ func assemble(fs []file, price func(string) *catalog.Price) (Session, bool) {
 		return filepath.Base(fs[i].path) < filepath.Base(fs[j].path)
 	})
 	s := Session{Agent: fs[0].agent, Path: fs[0].path, Models: []Model{}}
+	for _, f := range fs {
+		s.ReadOnly = s.ReadOnly || f.readOnly
+	}
 	s.ID = strings.TrimPrefix(fs[0].key, s.Agent+":")
 	var named, first string
 	models := map[string]*Model{}
@@ -892,13 +902,17 @@ func assemble(fs []file, price func(string) *catalog.Price) (Session, bool) {
 	if s.Title == "" && s.Tokens.zero() {
 		return s, false // nothing was said in it
 	}
-	s.Resume = ResumeCommand(s.Agent, s.ID, s.Cwd)
+	if !s.ReadOnly {
+		s.Resume = ResumeCommand(s.Agent, s.ID, s.Cwd)
+	}
 	return s, true
 }
 
 // parse reads a file on from where old left it, or from the start.
 func parse(f file, old *state) *state {
 	switch f.agent {
+	case "hermes":
+		return parseHermes(f)
 	case "opencode", "zcode":
 		return parseOpenCode(f)
 	case "dsh":
@@ -907,6 +921,8 @@ func parse(f file, old *state) *state {
 		return parseCline(f)
 	case "grok":
 		return parseGrok(f)
+	case "cursor":
+		return parseCursor(f)
 	}
 	headBytes := headOf(f.path)
 	var s *state
@@ -1187,6 +1203,12 @@ func ResumeCommand(agent, id, cwd string) string {
 		run = "grok --resume " + id
 	case "omp":
 		run = "omp --resume " + id
+	case "cursor":
+		// its chats are looked up by the folder it runs in
+		if cwd == "" {
+			return ""
+		}
+		run = "cursor-agent --resume " + id
 	default:
 		return ""
 	}

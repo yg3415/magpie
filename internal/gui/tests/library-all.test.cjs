@@ -88,7 +88,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await browser.close();
     });
     const open = async (lang, tab, posts, fail) => {
-      const ctx = await browser.newContext({ viewport: { width: 980, height: 700 } });
+      const ctx = await browser.newContext({ viewport: { width: 980, height: 800 } }); // the MCP tab fits, its "In projects" too
       await ctx.addInitScript((tab) => { try { localStorage.setItem("magpie.libTab", tab); } catch {} }, tab);
       const page = await ctx.newPage();
       page.setDefaultTimeout(5000);

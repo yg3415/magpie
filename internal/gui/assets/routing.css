@@ -188,6 +188,8 @@
 /* what a call was for (a Codex guardian review, a title…): a quiet grey tag by the model */
 .rt-req .asked .kind, .rp-req .kind, .rt-steps li .kind { flex: none; font-size: 10.5px; line-height: 16px; padding: 0 5px; border-radius: 5px; color: var(--muted); background: var(--card-2); border: 1px solid var(--line); white-space: nowrap; }
 .rt-steps li .kind { display: inline-block; vertical-align: 1px; }
+.rt-steps li .rt-named { white-space: nowrap; }
+.rt-steps li .rt-named > .ic { width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; }
 /* in a narrow row the model keeps its room first: the tag gives way, to an ellipsis */
 .rt-req .asked .kind { flex: 0 100 auto; min-width: 3.2em; max-width: 9em; overflow: hidden; text-overflow: ellipsis; }
 .rt-req .asked.kinded .m { flex: none; max-width: calc(100% - 3.2em - 40px); }
@@ -299,7 +301,33 @@ button.rt-session { cursor: pointer; }
 .rt-pool .ctl { display: grid; grid-template-columns: auto auto; align-items: center; justify-items: start; gap: 6px 8px; }
 .rt-pool .lab { display: contents; }
 .rt-pool .lab small { font-size: 11px; color: var(--muted); }
-@media (max-width: 560px) { .rt-group .tags { display: none; } }
+@media (max-width: 560px) { body:not(.web) .rt-group .tags { display: none; } }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1024px) {
+  body.web .rt-group {
+    display: grid; grid-template-columns: 20px minmax(0, 1fr) auto;
+    gap: 6px 8px; padding: 12px;
+  }
+  body.web .rt-group .tags { display: flex; flex-wrap: wrap; grid-column: 2 / -1; grid-row: 2; }
+  body.web .rt-group > .text { grid-column: 3; grid-row: 1; }
+  body.web .rt-group .nm { flex-wrap: wrap; }
+  body.web .rt-group .mem { white-space: normal; overflow-wrap: anywhere; }
+  body.web .rt-pick { height: auto; min-height: 44px; padding: 8px; font-size: 12.5px; }
+  body.web .rt-pick { flex-wrap: wrap; }
+  body.web .rt-gedit { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 12px; }
+  body.web .rt-gedit label { text-align: left; padding-top: 8px; }
+  body.web .rt-gedit .segs { flex-wrap: wrap; }
+  body.web .rt-gedit .fbrow { flex-wrap: wrap; }
+  body.web .rt-gedit .fbrow .n { flex: 1 1 calc(100% - 60px); white-space: normal; overflow-wrap: anywhere; }
+  body.web .rt-gedit .fbrow > .grow { display: none; }
+  body.web .rt-gedit .fbrow .text { min-width: 44px; }
+  body.web .rt-cond { height: auto; min-height: 44px; }
+  body.web .rt-gadd { min-height: 44px; }
+  body.web .rt-pool .ctl { grid-template-columns: minmax(0, 1fr); }
+  body.web .rt-pool .lab small { padding-top: 6px; }
+  body.web .rt-pool .segs { flex-wrap: wrap; }
+  body.web .rt-stats { flex-wrap: wrap; gap: 10px 16px; }
+  body.web #view-routing > .row-head .note { flex: 1 1 100%; order: 1; margin: 0; }
+}
 .rt-gsec .segs .opt { white-space: nowrap; }
 @container (max-width: 520px) {
   .rt-gsec .row-head .note { display: none; }
@@ -310,6 +338,8 @@ button.rt-session { cursor: pointer; }
 .rt-gedit .fbrow .n { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rt-gedit .fbrow .n small { color: var(--muted); font-size: 11.5px; }
 .rt-gedit .fbrow.off .n { color: var(--muted); text-decoration: line-through; }
+.rt-gedit .fbrow .rt-mon { transform: scale(.85); }
+.rt-gedit .fbrow.muted > :not(.rt-mon):not(.text) { opacity: .45; }
 /* a member's own reasoning, beside its Up and Remove */
 .rt-gedit .fbrow .rt-fixed { height: 24px; padding: 0 9px; font-size: 11.5px; flex: none; }
 .rt-gadd {

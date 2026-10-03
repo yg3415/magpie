@@ -47,7 +47,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 - **Providers with one field.** Pick a preset (Anthropic, OpenAI, Gemini,
   DeepSeek, Kimi, GLM, MiniMax, StepFun, Qwen, Baidu Qianfan, Tencent Cloud Token Plan,
   Huawei Cloud MaaS, Volcengine Ark, Mistral, Groq, xAI, OpenRouter, Together,
-  Fireworks, SiliconFlow, NVIDIA NIM, ModelScope, AiHubMix, 302.AI, Ollama, LM Studio…),
+  Fireworks, SiliconFlow, NVIDIA NIM, ModelScope, AiHubMix, PipeLLM, 302.AI, Ollama, LM Studio…),
   paste a key, done. Custom vendors need a name and a base URL. magpie never
   reads keys from your shell environment.
 - **Real model lists, nothing compiled in.** With a key in hand magpie asks
@@ -81,6 +81,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | OmO (omo-ai) | `~/.omo/agent/settings.json` (+ `models.json`; `$OMO_CODING_AGENT_DIR`, `$SENPI_CODING_AGENT_DIR`) | model |
 | Goose        | `~/.config/goose/config.yaml`     | model           |
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
+| Zed          | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux, `%APPDATA%\Zed` on Windows) | model (a `magpie` OpenAI-compatible provider; its catalog in Zed's picker) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
 | DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
@@ -91,6 +92,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Hermes Agent | `~/.hermes/config.yaml` (`$HERMES_HOME`) | model |
 | Kimi Code    | `~/.kimi/config.toml` (`$KIMI_SHARE_DIR`) | model (a `magpie` provider; magpie's models in Kimi's /model) |
 | Muse Code    | `~/.config/muse/settings.json` (`$XDG_CONFIG_HOME`) | model (endpoint_transport to the gateway, auth none; magpie's models in Muse's list) |
+| Empryo       | `~/.empryo/config.json` | defaultModel (a `magpie` provider at the gateway in `providers`) |
 | MiniMax Code (mcode) | `~/.minimax/config.yaml` (`$MINIMAX_DATA_DIR`) | model (a `magpie` custom provider; magpie's models in its /model) |
 | Droid (Factory) | `~/.factory/settings.json` (`$FACTORY_HOME_OVERRIDE`) | model (magpie's models as BYOK `customModels`, in Droid's /model) |
 | Cline (CLI)  | `~/.cline/data/settings/providers.json` (`$CLINE_DIR`) | model, effort (magpie takes its openai-compatible provider) |
@@ -99,6 +101,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
 | ZCode        | `~/.zcode/v2/config.json`         | provider (magpie's models in ZCode's picker) |
 | WorkBuddy    | `~/.workbuddy/models.json` (`$WORKBUDDY_CONFIG_DIR`) | provider (magpie's models in WorkBuddy's picker) |
+| T3 Code      | `~/.t3/userdata/settings.json` (`$T3CODE_HOME/userdata`) | provider (a `magpie` provider instance on Claude Code, magpie's models as its custom models) |
 | OpenHanako   | `~/.hanako/provider-catalog.json` + `agents/<id>/config.yaml` (`$HANA_HOME`; its local API while it runs) | model (the primary agent's; magpie's models as a provider) |
 | Alma         | Alma's local API (`localhost:23001`, while Alma runs) | model (Alma's default; magpie's models as a provider) |
 
@@ -143,6 +146,17 @@ deleted keys keep their historical identity. Older records appear as
 **key not recorded**, never inferred from today's configured key.
 These are upstream credentials, not keys clients use to call Magpie.
 
+It lists **accounts** too: each Codex, Claude or other subscription account's
+tokens and cost, by the account that actually answered — the one that took
+over after a failover, the one `X-Magpie-Account` pinned. The account is named
+as the Routing view names it (its email or login, never a token); the CSV
+adds `provider_account` (JSON `providerAccount`), `magpie usage --csv
+--account <name>` keeps one account's calls, and the app's Usage page has an
+Accounts list and an Account filter on Requests. An older record names the
+account its call went out as when its host says so (`chatgpt.com as
+dee@example.com`); otherwise it appears as **account not recorded**, never
+inferred from today's sign-in. OTLP export never carries the account.
+
 One magpie can serve several computers (an office one, a personal one):
 share it on the network (Settings → Share on local network), and on each
 other computer add it as a **Remote magpie** — in the app's Add sheet, or
@@ -175,7 +189,29 @@ magpie gateway-key add "Remote laptop" # prints the new credential once
 magpie gateway-key list                # ids, names, enabled state and masked keys
 magpie gateway-key rotate <id>         # prints the replacement; identity stays the same
 magpie gateway-key remove <id>         # revokes remote access
+magpie gateway-key limit <id> week --tokens 2m --cost 5   # its own limit
+magpie gateway-key limit <id>          # limit, used, left and reset
+magpie gateway-key limit <id> off      # no limit
 ```
+
+Each gateway key can have its own **limit**: a token total, an estimated
+cost in US$, or both, per day, week or month (calendar windows in local
+time: from midnight, from Monday, from the 1st). Set it with **Limit** on
+the key's row (saved with Save) or `magpie gateway-key limit`; the row shows
+what the key has used, what is left and when it resets. Tokens counted are a
+call's uncached input, output and cache writes, plus cache reads when **Count
+cache reads too** is on. Cost is an estimate at the Usage page's prices; a
+call with no known price adds none. A call counts in the window it started
+in. Once a key is spent, its requests are refused before any provider is
+asked, with a 429 in the API's own error shape that names the key, the
+limit and the reset time, plus `Retry-After`; other keys are unaffected. The
+counts are read from the usage log, so they survive a restart. A request in
+flight holds a reservation (its body's size in tokens plus the key's mean
+output per call), so requests sent at once overshoot by about one call; a
+streamed reply is settled when it ends with the usage its vendor reported.
+A key can read its own status with `GET /v1/magpie/limit`. Requests from
+this computer that send no gateway key are not limited; a gateway key used
+from this computer is.
 
 While LAN sharing is enabled, remote requests require an enabled gateway key
 sent as Bearer, `x-api-key`, `x-goog-api-key` or `?key=`. Loopback remains
@@ -430,7 +466,9 @@ magpie claude group/opus-anywhere       # use it
 `routing=` is `smart` (the default: of the subscriptions with quota to
 spare, the one whose allowance renews soonest first), `order` (the first
 model until it can't answer, then the next), `rotate` (each turn to the next
-member) or `usage` (least used first). `stays=` is how long a conversation
+member), `usage` (least used first) or `pace` (weekly pace: the account with
+the most of its week left per hour until it renews first, so less of a week
+is lost at its reset). `stays=` is how long a conversation
 stays with the key or account that answered it: `auto` (the default, while
 the vendor's cache of it is worth keeping), `session`, `turn` or `off`.
 `models=` replaces the whole list, in order; a bare model id works when only
@@ -538,7 +576,7 @@ Each `/v1/models` entry includes `reasoning` and `supported_reasoning_levels`
 (`[{"effort":"low"}, ...]`). A routing group lists only the levels every
 member supports. `native_endpoints` (`["/v1/messages"]`) names the APIs a
 request for the model is passed straight through on; it is left out of a
-routing group, and of a model every request to is translated anyway.
+routing group, and of a model every request to which is translated anyway.
 
 Requests pass straight through when the vendor speaks the agent's API and
 are translated otherwise, streaming, tool calls and reasoning included. The
@@ -574,6 +612,12 @@ holds the answer until the route changes past the `seq` of the last one,
 so a UI can follow a turn with one request at a time. Only the session
 named is told; like `/v1/magpie/quotas`, it answers this machine, and
 another only with the key of a gateway shared on the local network.
+
+To show the one in use without a session, `GET /v1/magpie/quotas` (and
+`magpie quota --json`, the same list) has `lastServedAt` on each
+subscription account, plan and key that answered a request through the
+gateway in the last 30 days, and `last: true` on the latest. It is kept
+in `served.json` beside `providers.json`, so a restart keeps it.
 
 The *Gateway* tab in the app has this as copy buttons and ready-made
 snippets (shell, curl, Python, Node) for each API, the list of model ids,
@@ -900,16 +944,129 @@ MAGPIE_OTEL_ENABLED=true MAGPIE_OTEL_ENDPOINT=http://localhost:4318 magpie serve
 - `MAGPIE_OTEL_HEADERS`: comma-separated `name=value` pairs, for example
   `Authorization=Bearer%20token`. Percent-encode spaces and commas in values.
 - `MAGPIE_OTEL_METRICS`: `true` or `false`, off by default.
+- `MAGPIE_OTEL_SESSIONS`: `true` or `false`, off by default; trace supported local
+  agent interactions from newly recorded session events.
+- `MAGPIE_OTEL_BODIES`: `true` or `false`, off by default; sends each call's
+  request and reply as the trace's Langfuse input and output.
+- `MAGPIE_OTEL_BODIES_WHOLE`: `true` or `false`, off by default; with bodies on,
+  keeps them entire rather than cut at 256 KB. A long reply is written to a
+  temporary file; a body too large for the collector is still refused.
 
 For Langfuse, use `https://<your-langfuse-host>/api/public/otel` as the base
 URL and `Authorization=Basic%20<base64(public-key:secret-key)>` as the header.
-Leave metrics off. This uses Langfuse's OTLP ingestion endpoint.
+Leave metrics off. This uses Langfuse's OTLP ingestion endpoint. For Langfuse
+v4, add the header `x-langfuse-ingestion-version=4` for real-time ingestion.
 
 Traces include agent, provider, model, token counts (including cache and
 reasoning), HTTP status, timing, and route ID. Attempts with the same route ID
-share a trace ID. Metrics group duration and input/output token histograms by
-agent, provider, model, operation and error status. Prompt/reply text, tool
-arguments, sessions and provider account names/keys are never exported.
+share a trace ID. Chat, Responses, Anthropic and Gemini gateway requests
+also export a parent request span and child spans for every routing attempt,
+including unbilled failures, retries and fallbacks, so Langfuse can render a
+waterfall. A valid incoming W3C version-00 `traceparent` connects these spans
+to the caller's trace. Attempt spans carry token usage; the parent does not
+duplicate it. Attempt timings include any wait for a concurrency slot, while
+routing and retry delays remain visible as gaps inside the parent span.
+Tool execution inside the caller is outside the gateway's trace.
+
+Enable **Trace agent conversations** to instead export one trace per
+user interaction, grouping model calls and tool executions under an agent
+root. Conversation IDs group those traces into Langfuse sessions. Gateway traces
+remain available until a visible local store covers that exact agent/session.
+For Codex and Pi, a readable session header establishes readiness without
+waiting for a model/tool span. The first request checks a header bounded to
+256 KiB when needed (including Codex base instructions); subsequent polls keep
+idle sessions ready while their files remain among the reader's 200 newest main
+files. Claude children have a separate 200-file quota and share the same 8 MiB
+polling read budget. Header checks never upload history or bodies. Discovery is shared across
+request IDs for two seconds. The request that refreshes discovery waits for the
+scan; other unresolved concurrent requests retain gateway traces without waiting.
+Polling reuses headers by path, size and mtime.
+Other adapters still use recent observations (five minutes).
+Only loopback requests without a gateway key can be deduplicated. The native
+client session ID takes precedence over a Magpie routing override; unknown
+sessions retain gateway traces, including WSL mirrored and Docker Desktop
+clients whose sessions are not visible locally. Requests without a session ID
+fall back to recent observations for that agent.
+Claude Code/Cowork readers also follow `<session>/subagents/*.jsonl`. Child
+interactions share their parent session and use separate trace/span IDs, even
+when a user UUID is copied. Child final responses are combined across content
+blocks and exported when the transcript is unchanged for two seconds; no
+`turn_duration` is required.
+Their start times remain inferred; a parent tool link is not guessed. Main-thread calls can therefore be deduplicated. Claude
+tool-less small requests (`max_tokens` at most 4096), including title/haiku
+helpers, retain gateway traces because they may not enter a transcript. This
+conservative rule can retain a short tool-less main request as well. Explicitly
+classified auxiliary calls also retain gateway traces for other agents. This
+includes Codex calls with an explicit kind (subagent, review, memgen, title or
+compact): even if a child has a readable rollout, these can appear twice. Only
+its unclassified calls use local-session deduplication; a rollout alone does not
+prove every auxiliary request was recorded. Keyed and non-loopback clients
+always retain gateway traces. Magpie reads new events from local session stores
+every two seconds; it does not upload
+completed history when enabled. Restarting or changing the destination starts
+an observation window. Span IDs remain stable across repeated records.
+
+Pi and Codex have been tested end to end with real clients. The other adapters
+are covered by format fixtures but have **not been tested end to end**.
+
+Supported clients and formats:
+
+| Client | Local store | Timing |
+| --- | --- | --- |
+| Codex | JSONL rollouts (`token_usage_record`, `item_completed`, `response_item`) | Recorded operations and paired native tools; inferred model/native-tool intervals |
+| Pi | Version-3 JSONL; optional `timing-final` | Recorded model times; inferred tool intervals |
+| Oh My Pi | Pi-compatible JSONL, including `model_usage` | Pi timing; auxiliary calls have inferred zero duration |
+| Claude Code / Cowork | `projects/*/*.jsonl` and `<session>/subagents/*.jsonl`, repeated assistant blocks and paired tool results | Inferred model/tool starts; recorded transcript boundaries |
+| OpenCode | SQLite V1/V2 (`message`/`part` or `session_message`); legacy JSON storage | Recorded model and tool timestamps |
+| Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json[l]`, including patches and rewinds | Inferred intervals from message/tool event boundaries |
+
+The adapters follow upstream schemas:
+[OpenCode V1](https://github.com/anomalyco/opencode/blob/dev/packages/schema/src/v1/session.ts),
+[OpenCode V2](https://github.com/anomalyco/opencode/blob/dev/packages/schema/src/session-message.ts),
+[Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/services/chatRecordingTypes.ts),
+[Oh My Pi](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/session-manager.ts).
+Claude transcript records are checked against local Claude Code sessions;
+its [hook documentation](https://code.claude.com/docs/en/hooks) describes
+transcript locations. Separate subagent transcripts are not joined: the parent
+agent's task/delegation tool is included, but its children's internal work is
+not yet linked. No hooks or client changes are required.
+
+Polling uses a soft 8 MiB reading budget and up to 200 recent files per store.
+JSONL files are read incrementally; incomplete lines wait for the next poll.
+OpenCode SQLite is opened read-only, including WAL changes, and unchanged
+stores are skipped. SQLite message/part updates are read incrementally in bounded
+batches on separate read-only connections; oversized conversations resume on the
+next poll. OpenCode retains up to 256 messages and an 8 MiB body window per
+session; individual rows above 8 MiB export metadata only. Legacy JSON and
+Gemini snapshot reads cap at 32 MiB; Gemini retains the current prompt plus
+255 recent messages.
+Completed observations are deduplicated with bounded metadata. Claude's final
+response and Gemini's final token records may take one extra poll to settle.
+
+Inferred timings carry `magpie.timing.source=inferred`. Tool arguments/results
+and user input/output follow **Include request and response bodies**, masking
+secrets and respecting the whole-body preference. Session directory/title
+metadata, credentials and account names are not exported.
+
+Conversation tracing replaces standalone gateway traces for these local
+clients to avoid duplicate token usage. Unsupported clients and remote
+forwarded requests retain gateway tracing; the local usage ledger is unchanged.
+This mode shows agent activity rather than gateway retries or provider-routing
+details. It reads this computer's local sessions, including calls made without
+Magpie as the proxy.
+
+Metrics group duration and input/output token histograms by agent, provider,
+model, operation and error status. Prompt/reply text is exported only when
+**Include request and response bodies** is enabled (`MAGPIE_OTEL_BODIES=true`);
+secrets are masked and each body is limited to 256 KiB unless **Include the
+whole bodies** is enabled. Conversation IDs are exported only with
+conversation tracing; provider account names/keys are never exported.
+
+Whole bodies increase transient memory and allocation costs during read-back,
+secret scrubbing and JSON encoding; a 32 MiB request and reply can roughly
+double total allocations compared with truncated export. The export limits
+queued bodies to 128 MiB, but this does not bound in-flight processing memory.
+Recent calls retain only the first 256 KiB of each body.
 
 Export runs in the background with a bounded queue (128 records) and batches
 of up to 32 records, flushed every five seconds. A full queue drops telemetry
@@ -926,6 +1083,37 @@ Queued records are discarded if export is disabled or the destination or
 credentials change before sending. Redirects are not followed.
 Backups without keys omit OTLP headers; restoring one preserves this machine's
 headers only when the collector endpoint is unchanged.
+
+## Mirrors
+
+Mirror fallback is off by default. Set `MAGPIE_MIRRORS=on` to use it. When
+it is on, the official source is tried first; a mirror is only tried after
+a network error, HTTP 429, HTTP 5xx, or GitHub's rate-limit 403. The
+defaults are `registry.npmmirror.com` for npm and `gh-proxy.com` for
+GitHub. `MAGPIE_NPM_REGISTRY` and `MAGPIE_GITHUB_MIRROR` replace them.
+
+Only two downloads are checked against a checksum that does not come from
+the mirror: Magpie's own update assets (their SHA-256 comes from the
+unmirrored update feed) and Bun's zip. Bun's default version carries its
+SHA-256s in the code, so it can be downloaded through a mirror even when
+Bun's official `SHASUMS256.txt` is unreachable; a newer Bun still needs
+that official file. Skill tarballs and the plugin-market registry always
+use the official source. npm metadata, plugin README/search results and
+version checks are not checksummed; a mirror can report a different
+version.
+
+The official source and a mirror share one request budget, so a hanging
+official source doesn't make the whole wait twice as long.
+
+Requests that carry credentials, such as an `Authorization`, `Cookie`,
+API key, or URL userinfo/query token, never use a mirror; they go to the
+official source alone.
+
+```sh
+MAGPIE_MIRRORS=on \
+MAGPIE_NPM_REGISTRY=https://registry.example.com \
+MAGPIE_GITHUB_MIRROR=https://gh.example magpie serve
+```
 
 ## Files
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -171,6 +172,7 @@ func accountsCmd(args []string) error {
 		} else if r.Error != "" {
 			line += "  " + muted.Render(r.Error)
 		}
+		line += quotaReadingCell(r.AsOf, r.Windows)
 		fmt.Println(line)
 	}
 	fmt.Println(faint.Render("  ● signed in · ○ takes over when it runs out · add one: magpie accounts add <agent> · switch: magpie accounts switch <agent> <email>"))
@@ -187,6 +189,7 @@ type accountRow struct {
 	Windows []quotaSpan `json:"windows"`
 	Error   string      `json:"error,omitempty"`
 	Lapsed  string      `json:"lapsed,omitempty"` // its sign-in has to be made again
+	AsOf    *time.Time  `json:"asOf,omitempty"`   // last reading when it couldn't be read now
 	// Resets are a Codex account's rate-limit resets, when it holds any.
 	Resets *provider.ResetCredits `json:"resets,omitempty"`
 }
@@ -227,7 +230,7 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 			if r.Plan == "" {
 				r.Plan = q.Plan
 			}
-			r.Error, r.Resets = q.Error, q.Resets
+			r.Error, r.Resets, r.AsOf = q.Error, q.Resets, q.AsOf
 			for _, w := range q.Windows {
 				s := quotaSpan{Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display}
 				if s.ResetsAt == nil && w.ResetSecs > 0 {
@@ -250,7 +253,22 @@ func quotaCell(w quotaSpan) string {
 		cell += " (" + w.Display + ")"
 	}
 	if w.ResetsAt != nil {
-		cell += muted.Render(" ↻" + untilShort(time.Until(*w.ResetsAt)) + " " + provider.ResetClock(*w.ResetsAt, time.Now()))
+		if !w.ResetsAt.After(time.Now()) {
+			cell += muted.Render(" · reset time passed " + w.ResetsAt.Local().Format("Jan 2 15:04"))
+		} else {
+			cell += muted.Render(" ↻" + untilShort(time.Until(*w.ResetsAt)) + " " + provider.ResetClock(*w.ResetsAt, time.Now()))
+		}
+	}
+	return cell
+}
+
+func quotaReadingCell(at *time.Time, ws []quotaSpan) string {
+	if at == nil {
+		return ""
+	}
+	cell := "  " + muted.Render("as of "+at.Local().Format("Jan 2 15:04")+" (cached)")
+	if slices.ContainsFunc(ws, func(w quotaSpan) bool { return w.ResetsAt != nil && !w.ResetsAt.After(time.Now()) }) {
+		cell += muted.Render(" · expired window; current allowance unknown")
 	}
 	return cell
 }

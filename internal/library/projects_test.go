@@ -72,7 +72,7 @@ func TestProjectSkillsLinked(t *testing.T) {
 	}
 
 	// removing the project takes away all it placed, and its lines
-	ok(t)(RemoveProject(proj))
+	ok(t)(RemoveProject(proj, false))
 	gone(t, filepath.Join(proj, ".agents"))
 	if g := read(t, filepath.Join(proj, ".gitignore")); g != "node_modules/\n" {
 		t.Errorf(".gitignore after: %q", g)
@@ -140,7 +140,7 @@ func TestProjectRefusesForeignFolder(t *testing.T) {
 	}
 	// removing the project leaves the folder that isn't magpie's
 	ok(t)(ProjectSkill(proj, "pdf", nil))
-	ok(t)(RemoveProject(proj))
+	ok(t)(RemoveProject(proj, false))
 	if _, err := os.Stat(filepath.Join(proj, ".claude/skills/pdf/SKILL.md")); err != nil {
 		t.Error("the project's own went")
 	}

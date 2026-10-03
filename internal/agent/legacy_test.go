@@ -111,6 +111,11 @@ func TestMoveCursorEfforts(t *testing.T) {
 	if err := provider.Save(provider.Provider{ID: "curs", Name: "Curs", Chat: "https://curs.example/v1", Key: "k", Models: []string{"grok-4.7"}}); err != nil {
 		t.Fatal(err)
 	}
+	// Pi is offered the levels its entry gives the model (#597): a model
+	// with none would be offered off alone, and low not moved
+	if err := provider.SetModelEfforts("curs/grok-4.7", []string{"low", "high"}); err != nil {
+		t.Fatal(err)
+	}
 	base := func(id string) (string, string, bool) {
 		if id == "grok-4.7-low" || id == "gone-low" {
 			return strings.TrimSuffix(id, "-low"), "low", true

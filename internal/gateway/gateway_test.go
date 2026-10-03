@@ -564,6 +564,31 @@ func TestAnthropicPassthroughModelThatAlwaysThinks(t *testing.T) {
 	}
 }
 
+// DashScope's glm-5.3 cannot think with it off either, in its own words
+// ("The value of the enable_thinking parameter is restricted to True."):
+// the request magpie turned it off for is asked again with it left to the
+// model, once
+func TestAnthropicPassthroughDashScopeThinkingRestricted(t *testing.T) {
+	f := &fake{t: t, ctype: "application/json", reply: `{"id":"msg","type":"message","content":[]}`}
+	f.refuse = func(b []byte) (int, string) {
+		if bytes.Contains(b, []byte(`"disabled"`)) {
+			return 400, `{"error":{"code":"InternalError.Algo.InvalidParameter","message":"The value of the enable_thinking parameter is restricted to True.","type":"invalid_request_error"}}`
+		}
+		return 0, ""
+	}
+	setup(t, provider.Anthropic, f)
+	code, body := post(t, "/v1/messages", `{"model":"m1","max_tokens":5,"messages":[{"role":"user","content":"title?"}]}`)
+	if code != 200 || f.calls != 2 || bytes.Contains(f.got, []byte("thinking")) || !bytes.Contains(f.got, []byte(`"title?"`)) {
+		t.Fatalf("%d %s after %d calls, last sent %s", code, body, f.calls, f.got)
+	}
+	// another 400 is the agent's to see, not asked again
+	f.calls = 0
+	f.refuse = func([]byte) (int, string) { return 400, `{"type":"error","error":{"message":"bad request"}}` }
+	if code, _ := post(t, "/v1/messages", `{"model":"m1","max_tokens":5,"messages":[]}`); code != 400 || f.calls != 1 {
+		t.Errorf("%d after %d calls", code, f.calls)
+	}
+}
+
 func TestOpenRouterMandatoryReasoningRetries(t *testing.T) {
 	const refusal = `{"error":{"message":"OpenRouter: Reasoning is mandatory for this endpoint and cannot be disabled.","type":"invalid_request_error"},"type":"error"}`
 	for _, tc := range []struct {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // desktopSandbox is a home of its own with nothing of this machine's in
@@ -305,5 +306,44 @@ func TestClaudeDesktopRefusesOddFiles(t *testing.T) {
 	desktopWrite(t, p.meta, `{"entries":{}}`)
 	if err := claudeDesktop(home).Field("provider").Set("magpie"); err == nil {
 		t.Fatal("entries that aren't a list were taken")
+	}
+}
+
+// each of Claude Code's tiers in Desktop's Code tab can have a model of its
+// own (WilianWeng): offered once Desktop is on magpie, set by the catalog id
+// or by the id Desktop is shown, and taken away with ""
+func TestClaudeDesktopTiers(t *testing.T) {
+	home, _ := desktopSandbox(t)
+	if err := provider.Save(provider.Provider{ID: "v", Name: "V", Chat: "http://127.0.0.1:1/v1", Key: "k", Models: []string{"a", "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	a := claudeDesktop(home)
+	f := a.Field("sonnet")
+	if f == nil || !f.Quiet {
+		t.Fatal("no quiet sonnet field")
+	}
+	if len(f.Options(nil)) != 0 {
+		t.Fatal("tiers offered before Desktop is on magpie")
+	}
+	if err := a.Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Options(nil)) != 2 {
+		t.Fatalf("options: %+v", f.Options(nil))
+	}
+	if err := f.Set("v/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Field("haiku").Set(gateway.DesktopID(provider.Entry{ID: "v/b"})); err != nil {
+		t.Fatal(err)
+	}
+	if f.Get() != "v/a" || a.Field("haiku").Get() != "v/b" || a.Field("opus").Get() != "" {
+		t.Fatalf("tiers: %v", gateway.DesktopTiers())
+	}
+	if err := f.Set("nope/x"); err == nil {
+		t.Fatal("a model magpie doesn't serve was taken")
+	}
+	if err := f.Set(""); err != nil || f.Get() != "" {
+		t.Fatalf("unset: %v %q", err, f.Get())
 	}
 }

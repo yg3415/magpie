@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -30,6 +31,7 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library rtk on|off <agent>  switch it (on with RTK's own installer; off works with RTK gone)
   magpie library rtk install         install RTK (Homebrew, winget, or RTK's own script)
   magpie library rtk upgrade         bring RTK up to its latest release, the way it was installed
+  magpie library rtk path            put RTK on the PATH the agents get, when it isn't (their hooks run it by name)
 `
 
 // libraryCmd is magpie library …: the instructions, MCP servers and skills
@@ -339,6 +341,11 @@ func rtkCmd(args []string) error {
 		if v, err = library.InstallRTK(); err != nil {
 			return err
 		}
+	case len(args) == 1 && args[0] == "path":
+		var err error
+		if v, err = library.PathRTK(); err != nil {
+			return err
+		}
 	case len(args) == 1 && args[0] == "upgrade":
 		fmt.Println(muted.Render("upgrading rtk…"))
 		var err error
@@ -376,6 +383,17 @@ func rtkCmd(args []string) error {
 		case len(args) == 1 && args[0] == "upgrade":
 			fmt.Println(green.Render("  up to date"))
 		}
+		if v.OffPath {
+			fmt.Println(amber.Render("  rtk isn't on your PATH"), muted.Render("— the agents' hooks run it by name, so RTK does nothing for them"))
+			switch {
+			case v.PathDir == "":
+				fmt.Println(muted.Render("  add " + filepath.Dir(v.Path) + " to PATH in your shell profile"))
+			case v.PathLink:
+				fmt.Println(muted.Render("  magpie library rtk path links it into " + v.PathDir))
+			default:
+				fmt.Println(muted.Render("  magpie library rtk path adds " + v.PathDir + " to your user PATH"))
+			}
+		}
 		if g := v.Gain; g != nil {
 			fmt.Printf("  %d tokens saved over %d commands (%.0f%% on average)\n", g.Saved, g.Commands, g.Pct)
 		}
@@ -387,6 +405,8 @@ func rtkCmd(args []string) error {
 			mark = green.Render("on ")
 			if v.Path == "" {
 				mark, note = amber.Render("on "), muted.Render(" — its hook calls rtk, which isn't installed: install it, or switch this off")
+			} else if v.OffPath {
+				mark, note = amber.Render("on "), muted.Render(" — its hook can't find rtk on PATH, so it does nothing")
 			}
 		}
 		fmt.Println(" ", mark, a.Name+note)

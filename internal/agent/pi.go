@@ -107,3 +107,67 @@ func piStartup(settings, def string) string {
 	}
 	return first
 }
+
+// piOffered are the thinking levels Pi offers for model, a provider/model
+// as the model field shows it, when it is one of magpie's: what Pi's
+// /thinking lists for the entry magpie writes for it in models.json. nil
+// for any other model, whose levels are Pi's own business.
+func piOffered(agentID, model string) []string {
+	ref, ok := strings.CutPrefix(model, magpieID+"/")
+	if !ok {
+		return nil
+	}
+	for _, m := range magpieModels(agentID) {
+		if m.ID == ref {
+			return piSupported(piModelJSON(m, "", true))
+		}
+	}
+	return nil
+}
+
+// piSupported are the thinking levels Pi offers for a models.json entry, as
+// pi-ai's getSupportedThinkingLevels reads it: off alone for a model not
+// marked reasoning; else each of its levels not mapped to null, xhigh and
+// max only where they are mapped.
+func piSupported(e map[string]any) []string {
+	if r, _ := e["reasoning"].(bool); !r {
+		return []string{"off"}
+	}
+	levels, _ := e["thinkingLevelMap"].(map[string]any)
+	var out []string
+	for _, l := range piLevels {
+		v, set := levels[l]
+		if set && v == nil || !set && (l == "xhigh" || l == "max") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// piClamp is the level Pi runs a model at when it is set to level, as
+// pi-ai's clampThinkingLevel picks it among the levels it offers: level
+// itself, else the nearest above it, else the nearest below.
+func piClamp(level string, offered []string) string {
+	if slices.Contains(offered, level) {
+		return level
+	}
+	at := slices.Index(piLevels, level)
+	if at < 0 {
+		if len(offered) > 0 {
+			return offered[0]
+		}
+		return "off"
+	}
+	for _, l := range piLevels[at:] {
+		if slices.Contains(offered, l) {
+			return l
+		}
+	}
+	for i := at - 1; i >= 0; i-- {
+		if slices.Contains(offered, piLevels[i]) {
+			return piLevels[i]
+		}
+	}
+	return "off"
+}

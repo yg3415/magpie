@@ -524,6 +524,11 @@ func (d *codeAssistDecoder) decode(data string, emit func(Event)) error {
 				if p.Signature != "" {
 					emit(Event{Kind: KSig, Text: p.Signature})
 				}
+			case p.InlineData != nil && p.InlineData.Data != "":
+				// a picture an image model drew (gemini-*-image): its
+				// thought images, drafts on the way, stay with the
+				// reasoning above (#620)
+				emit(Event{Kind: KImage, Name: p.InlineData.MimeType, Text: p.InlineData.Data})
 			case p.Text != "":
 				emit(Event{Kind: KText, Text: p.Text})
 			}

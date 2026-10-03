@@ -65,6 +65,7 @@ func served(rest, key string, tokens int) {
 // when it has one, the candidate's model-specific rest.
 func servedCandidate(c candidate, tokens int) {
 	served(c.restKey(), c.restKey(), tokens)
+	provider.NoteServed(c.p, time.Now())
 	if id := c.restID(); id != c.restKey() {
 		clearRest(id)
 	}
@@ -129,6 +130,10 @@ const (
 	// failFloor: the request asked for a shorter reply than the provider
 	// gives, and is sent again asking for the least it takes
 	failFloor = "floor"
+	// failUpdate: the upstream turned away the configuration_update items
+	// a changed effort went as (#617), and the request is sent again
+	// without them
+	failUpdate = "update"
 	// failVerify: the account must be verified with its vendor (Google's
 	// VALIDATION_REQUIRED) before it is served again
 	failVerify = "verify"
@@ -138,6 +143,9 @@ const (
 	// failShape: the vendor couldn't read the request's shape (#350) — the
 	// next one is asked, and nobody rests
 	failShape = "shape"
+	// failEffort: the account's plan doesn't take the reasoning level
+	// asked for (#520) — another account is asked, and nobody rests
+	failEffort = "effort"
 	// failProxy: the proxy magpie sends through (its own setting, the
 	// *_PROXY variables, the system's) didn't take the connection (#381) —
 	// nothing reached the vendor, so the next one is asked, and nobody rests
@@ -362,12 +370,15 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 }
 
 // full is when a subscription whose allowance, as last known, has a window
-// used up for the candidate's model renews; zero otherwise.
+// used up for the candidate's model renews; zero otherwise. Used up is
+// all but (usedShare), except In order: there an account at 98% is still
+// tried in its turn, and one that fails then isn't benched until its week
+// renews unless the vendor said it was out (#530).
 func (c candidate) full(now time.Time) time.Time {
 	if c.p.Account == nil {
 		return time.Time{}
 	}
-	return allowances(c.p.Account.UsageAgent())[c.p.Account.User].Full(c.model, usedShare, now)
+	return allowances(c.p.Account.UsageAgent())[c.p.Account.User].Full(c.model, provider.SpentShareOf(c.p.Routing), now)
 }
 
 // keepRetry passes on, with a vendor's error, what it said about when to
@@ -483,6 +494,9 @@ func (c candidate) allowanceKey() allowanceKey {
 type left struct {
 	used   float64
 	renews []time.Time
+	soon   []time.Time // renews as Smart ranks them (Allowance.Renewal)
+	pace   float64     // weekly pace: share of its week left per hour until it renews
+	due    time.Time   // when the window that pace went by renews; zero when not known
 }
 
 // learns: c is a subscription whose allowance isn't known yet, of an agent
@@ -513,7 +527,8 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		}
 		if a, ok := known[ag][c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
-			wg.lefts[c.allowanceKey()] = left{u, r} // one not known counts as unused
+			pc, due := a.Pace(c.model, now)
+			wg.lefts[c.allowanceKey()] = left{u, r, a.Renewal(c.model, now), pc, due} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
@@ -524,7 +539,10 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		// soonest, since what it has left is lost then, while one renewing
 		// later keeps: the biggest window decides — the week, not the five
 		// hours in it — and the next one only when that renews in the
-		// same hour. Those alike stay in their order, keeping the vendor's
+		// same hour. An account with no week (Claude Enterprise's five
+		// hours alone) goes by its five hours, so ahead of every week
+		// but one renewing sooner; a window not started renews its whole
+		// span from now (#576). Those alike stay in their order, keeping the vendor's
 		// prompt cache warm. Past that, whichever has the most left, and
 		// one all but used up only when nothing else can take it. Only the
 		// windows that count the model do: Opus's own weekly allowance
@@ -548,7 +566,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			if li, lj := learns(fine[i], lefts), learns(fine[j], lefts); li != lj {
 				return li
 			}
-			ri, rj := lefts[fine[i].allowanceKey()].renews, lefts[fine[j].allowanceKey()].renews
+			ri, rj := lefts[fine[i].allowanceKey()].soon, lefts[fine[j].allowanceKey()].soon
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {
@@ -600,6 +618,99 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			ca, cb := cs[idx[a]], cs[idx[b]]
 			if sa, sb := shareOf(ca), shareOf(cb); sa != sb {
 				return sa < sb
+			}
+			return tokens[idx[a]] < tokens[idx[b]]
+		})
+		out := make([]candidate, len(cs))
+		for i, j := range idx {
+			out[i] = cs[j]
+		}
+		cs = out
+	case provider.Pace:
+		// a subscription by what it has left of its week per hour until
+		// that renews, the most first: it has the most to lose at the
+		// reset, where the most left alone (least used) sends a fresh
+		// account ahead of one with 80% left and an hour to go, and the
+		// soonest reset alone (smart) sends one with 3% left and an hour
+		// to go ahead of one with 90% and two. The tiers are Smart's: one
+		// at 90% or more of any window that counts the model — the five
+		// hours too, a rate cap it would be sent into before its
+		// allowance was read again — waits until the others can't answer,
+		// one all but used up until nothing else can; each tier by the
+		// share used. Among the rest, one not known that tells what it
+		// has left as it answers goes first while it isn't, as in Smart,
+		// else it would never be known; then the pace, those alike within
+		// a tenth by what magpie sent them lately, then in their order,
+		// keeping the vendor's prompt cache warm. An account not known
+		// counts as a whole week ahead of it; a key has no week.
+		paceOf := func(c candidate) float64 {
+			if l, ok := lefts[c.allowanceKey()]; ok {
+				return l.pace
+			}
+			if c.p.Account != nil {
+				return provider.FreshPace
+			}
+			return 0
+		}
+		tier := func(share float64) int {
+			switch {
+			case share >= usedShare:
+				return 2
+			case share >= lowShare:
+				return 1
+			}
+			return 0
+		}
+		// the bands of pace alike within a tenth, the highest first: drawn
+		// before sorting, from each band's highest down, so that sorting
+		// by them is consistent — "within a tenth of each other" alone is
+		// not, three paces a twelfth apart each going round in a circle.
+		// Drawn among those the pace orders alone — one running low
+		// would otherwise set a band's top and part two alike behind it
+		var byPace []int
+		for i, c := range cs {
+			if tier(shareOf(c)) == 0 && !learns(c, lefts) {
+				byPace = append(byPace, i)
+			}
+		}
+		sort.SliceStable(byPace, func(a, b int) bool { return paceOf(cs[byPace[a]]) > paceOf(cs[byPace[b]]) })
+		band, top := make([]int, len(cs)), 0.0
+		for k, i := range byPace {
+			if p := paceOf(cs[i]); k == 0 || p < 0.9*top {
+				top = p
+				if k > 0 {
+					band[i] = band[byPace[k-1]] + 1
+					continue
+				}
+			} else {
+				band[i] = band[byPace[k-1]]
+			}
+		}
+		routed.Lock()
+		tokens := make([]float64, len(cs))
+		wg.tokens = map[string]float64{}
+		for i, c := range cs {
+			tokens[i] = routed.used[c.restKey()].now(now)
+			wg.tokens[c.rest] = tokens[i]
+		}
+		routed.Unlock()
+		idx := make([]int, len(cs))
+		for i := range idx {
+			idx[i] = i
+		}
+		sort.SliceStable(idx, func(a, b int) bool {
+			ca, cb := cs[idx[a]], cs[idx[b]]
+			sa, sb := shareOf(ca), shareOf(cb)
+			if ta, tb := tier(sa), tier(sb); ta != tb {
+				return ta < tb
+			} else if ta > 0 {
+				if sa != sb {
+					return sa < sb
+				}
+			} else if la, lb := learns(ca, lefts), learns(cb, lefts); la != lb {
+				return la
+			} else if band[idx[a]] != band[idx[b]] {
+				return band[idx[a]] < band[idx[b]]
 			}
 			return tokens[idx[a]] < tokens[idx[b]]
 		})

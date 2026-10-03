@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/appdir"
 )
 
 // The market is where the page finds MCP servers and skills to add in one
@@ -714,11 +716,11 @@ var popular = struct {
 }{}
 
 func marketCache(name string) string {
-	d, err := os.UserCacheDir()
+	d, err := appdir.SystemCache()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(d, "magpie", "market", name)
+	return filepath.Join(d, "market", name)
 }
 
 // popularSkills are skills.sh's most installed, read off its front page,

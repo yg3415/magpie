@@ -11,6 +11,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/update"
 )
 
 // served is the gateway this process serves, nil while another magpie
@@ -79,8 +80,13 @@ func watchGateway() {
 func serveGateway() *gateway.Server {
 	// handing over, the one there is this one's predecessor, which lets go
 	// once this one listens beside it
-	if !gateway.Handover && gateway.Running() {
-		return nil
+	if !gateway.Handover {
+		if o := gateway.ServedBy(); o.Running {
+			if update.Newer(gateway.Version, o.Version) {
+				log.Printf("gateway: magpie %s serves %s, older than this one (%s); agents' requests go through it until it quits", o.Version, gateway.URL(), gateway.Version)
+			}
+			return nil
+		}
 	}
 	gw := gateway.New()
 	served.Store(gw)

@@ -3,10 +3,11 @@
 // web UI had no request archive switch and no usage chart icons, and
 // /wails/runtime.js was a 404 in DevTools). In a browser there is no Wails
 // runtime, so the page never asks for /wails/runtime.js; the app's window
-// still does, for its close and maximise. Neither the Gateway page's request
-// archive switch nor the Usage page's chart and its ranking's icons wait on
-// it: in magpie web the switch is there and posts settings/archive, and the
-// chart draws its columns with each provider's icon beside it. In English and
+// still does, for its close and maximise. Neither the request archive's
+// switch, over the Usage page's requests, nor that page's chart and its
+// ranking's icons wait on it: in magpie web the switch is there and posts
+// settings/archive, and the chart draws its columns with each provider's icon
+// beside it. In English and
 // Chinese, Chromium and WebKit, with the API faked.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -87,8 +88,8 @@ function serve(lang, web, seen) {
 }
 
 const words = {
-  en: { name: "Request archive", off: "Off", on: "On", provider: "Provider" },
-  zh: { name: "请求存档", off: "关闭", on: "开启", provider: "供应商" },
+  en: { name: "Request archive", provider: "Provider" },
+  zh: { name: "请求存档", provider: "供应商" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -110,23 +111,25 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       };
 
       const { page, errors, failed, seen } = await open(true);
-      // the request archive's switch, over the recent calls
-      const row = page.locator("#archiveList .row.pref");
-      await row.waitFor();
-      assert.equal(await row.locator(".name").textContent(), w.name);
-      assert.deepEqual(await row.locator(".segs .opt").allTextContents(), [w.off, w.on]);
-      const y = () => page.locator("#view-gateway").evaluate((v) => v.scrollTop);
-      await row.scrollIntoViewIfNeeded();
+      await page.locator("#gateway .dot").waitFor();
+
+      // the request archive's switch, over the Usage page's requests
+      await page.locator('[data-view="usage"]').first().click();
+      await page.locator("#usageTab .opt").nth(1).click();
+      const sw = page.locator("#ledArchive .led-arch-sw");
+      await sw.waitFor();
+      assert.equal(await sw.textContent(), w.name);
+      assert.equal(await sw.getAttribute("aria-checked"), "false");
+      const y = () => page.locator("#view-usage").evaluate((v) => v.scrollTop);
+      await sw.scrollIntoViewIfNeeded();
       const before = await y();
-      await row.locator(".segs .opt").nth(1).click();
+      await sw.click();
       for (let i = 0; i < 50 && !seen.archive.length; i++) await page.waitForTimeout(40);
       assert.deepEqual(seen.archive, [{ on: true }]);
-      await page.locator("#archiveList .segs .opt.on").filter({ hasText: w.on }).waitFor();
+      await page.locator('#ledArchive .led-arch-sw[aria-checked="true"]').waitFor();
       assert.equal(await y(), before, "the click moved the page");
 
       // the Usage page's chart, its ranking by provider with their icons
-      await page.locator('[data-view="usage"]').first().click();
-      await page.locator("#usageTab .opt").nth(1).click();
       await page.locator("#ledRank .rk").first().waitFor();
       await page.locator("#ledSplit .opt").filter({ hasText: w.provider }).click();
       assert((await page.locator("#ledChart rect.col").count()) > 0, "the chart drew no columns");
@@ -144,7 +147,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // the app's window still takes its runtime, for close and maximise
       const app = await open(false);
-      await app.page.locator("#archiveList .row.pref").waitFor();
+      await app.page.locator("#gateway .dot").waitFor();
       for (let i = 0; i < 50 && !app.seen.paths.includes("/wails/runtime.js"); i++) await app.page.waitForTimeout(40);
       assert(app.seen.paths.includes("/wails/runtime.js"), "the app's window no longer loads its runtime");
       assert.deepEqual(app.errors, []);

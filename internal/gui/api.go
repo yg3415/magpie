@@ -5,6 +5,8 @@
 package gui
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -16,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -85,6 +88,8 @@ type agentJSON struct {
 	Fields []fieldJSON `json:"fields"`
 	// Drift: its config no longer does what magpie set, and how to set it again
 	Drift *agent.Drift `json:"drift,omitempty"`
+	// Wired: magpie is in its config, which its menu's Disconnect takes out
+	Wired bool `json:"wired,omitempty"`
 	// Import: an app that takes magpie by its own link (Cindy), and
 	// whether it has magpie already
 	Import string `json:"import,omitempty"`
@@ -176,13 +181,11 @@ type fxJSON struct {
 	Stale bool       `json:"stale"`
 }
 
-// currentFX asks internal/fx for the rate, bounded so a slow or absent
-// network never holds up a page's worth of state; its own cache makes this
-// return at once except right after each TTL (see internal/fx).
+// currentFX is the rate known now, never waited for: a stale one is asked
+// for behind it and shown on the next look (#541: the state waited up to
+// 4s on the network after each TTL, at every morning's start-up).
 func currentFX() fxJSON {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	r := fx.Get(ctx)
+	r := fx.Soon()
 	out := fxJSON{Rate: r.CNYPerUSD, Stale: r.Stale()}
 	if !r.At.IsZero() {
 		at := r.At
@@ -197,6 +200,8 @@ type settingsJSON struct {
 	Version string `json:"version"`
 	Dir     string `json:"dir"`     // where magpie keeps its files, as shown
 	Gateway string `json:"gateway"` // the local endpoint
+	// Dir is the data folder beside a portable magpie (#508)
+	Portable bool `json:"portable,omitempty"`
 	// Mac apps that explicitly handle .command files, for resumed sessions.
 	TerminalApps    []terminalChoice `json:"terminalApps,omitempty"`
 	TerminalDefault string           `json:"terminalDefault,omitempty"`
@@ -221,6 +226,17 @@ type settingsJSON struct {
 	SearchAPIs     []searchAPIJSON    `json:"searchAPIs"`
 	SearchVendors  []searchVendorJSON `json:"searchVendors"`
 	SearchProvider string             `json:"searchProvider,omitempty"`
+	// the providers Settings' Searcher may name, the one magpie picks when
+	// it names none, why the one it names isn't used (gateway.Searcher*),
+	// and the relays said to search that are never asked to (#359)
+	SearchChoices []searchChoiceJSON `json:"searchChoices"`
+	SearchAuto    string             `json:"searchAuto,omitempty"`
+	SearchUnused  string             `json:"searchUnused,omitempty"`
+	SearchRelays  []string           `json:"searchRelays,omitempty"`
+	// the GitHub token the library asks GitHub with, masked, and where it
+	// is from ("settings", GITHUB_TOKEN or GH_TOKEN); never the token
+	GitHubTokenMask string `json:"githubTokenMask,omitempty"`
+	GitHubTokenFrom string `json:"githubTokenFrom,omitempty"`
 	// where other machines reach the gateway while it is shared
 	LANURLs []string `json:"lanURLs,omitempty"`
 	// LANURLs are a container's own addresses, not the host's: the page
@@ -250,6 +266,16 @@ type searchAPIJSON struct {
 	Ready  bool   `json:"ready"`
 }
 
+// searchChoiceJSON is a provider that can search for a model that can't,
+// with the model it searches with when none is named, and its models.
+type searchChoiceJSON struct {
+	ID     string     `json:"id"`
+	Name   string     `json:"name"`
+	Icon   string     `json:"icon,omitempty"`
+	Small  string     `json:"small"`
+	Models []modelRef `json:"models"`
+}
+
 type searchVendorJSON struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -270,11 +296,30 @@ func searchState(s *settingsJSON) {
 		s.SearchVendors = append(s.SearchVendors, searchVendorJSON{ID: v.ID, Name: v.Name, KeysURL: v.KeysURL, NeedURL: v.Base == ""})
 	}
 	s.SearchProvider = gateway.Searcher()
+	s.SearchAuto, s.SearchUnused = gateway.AutoSearcher(), gateway.SearcherUnused()
+	s.SearchChoices = []searchChoiceJSON{}
+	for _, c := range gateway.Searchers() {
+		p := c.Provider
+		j := searchChoiceJSON{ID: p.ID, Name: p.Name, Icon: p.Icon, Small: c.Small, Models: []modelRef{}}
+		for _, m := range c.Models {
+			j.Models = append(j.Models, modelRef{ID: p.ID + "/" + m.ID, Name: cmp.Or(m.Name, m.ID), Provider: p.ID, PName: p.Name, Icon: p.Icon})
+		}
+		s.SearchChoices = append(s.SearchChoices, j)
+	}
+	for _, p := range gateway.RelaysSaidToSearch() {
+		s.SearchRelays = append(s.SearchRelays, p.Name)
+	}
 }
 
 func settingsState() settingsJSON {
-	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Gateway: gateway.URL()}
+	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	s.LANKey = "" // the retained credential belongs on disk, not in UI state
+	// the GitHub token, masked, and where the library's requests take one
+	// from: Settings, or the environment variable named
+	s.GitHubToken = ""
+	if tok, from := library.GitHubToken(); tok != "" {
+		s.GitHubTokenMask, s.GitHubTokenFrom = provider.Mask(tok), from
+	}
 	if found, err := discoverTerminals(); err == nil {
 		for _, app := range found.Apps {
 			s.TerminalApps = append(s.TerminalApps, terminalChoice{ID: app.ID, Name: app.Name})
@@ -286,7 +331,7 @@ func settingsState() settingsJSON {
 		s.NotifyProblem = notifyProblem()
 	}
 	s.ProxyNow, s.ProxySource = netproxy.Describe()
-	for _, name := range []string{"MAGPIE_OTEL_ENABLED", "MAGPIE_OTEL_ENDPOINT", "MAGPIE_OTEL_HEADERS", "MAGPIE_OTEL_METRICS"} {
+	for _, name := range []string{"MAGPIE_OTEL_ENABLED", "MAGPIE_OTEL_ENDPOINT", "MAGPIE_OTEL_HEADERS", "MAGPIE_OTEL_METRICS", "MAGPIE_OTEL_BODIES", "MAGPIE_OTEL_BODIES_WHOLE", "MAGPIE_OTEL_SESSIONS"} {
 		if _, ok := os.LookupEnv(name); ok {
 			s.OTelEnv = true
 		}
@@ -310,7 +355,7 @@ func settingsState() settingsJSON {
 	searchState(&s)
 	s.ImageGenAuto, s.ImageGenModels = gateway.AutoDrawer(), []modelRef{}
 	for _, p := range provider.All() {
-		if !p.On() || p.Decides() {
+		if !p.On() || p.DecideOnly() {
 			continue
 		}
 		for _, m := range gateway.Drawers(p) {
@@ -358,18 +403,55 @@ func init() {
 // new index.html after an update: a page without what that version added,
 // such as the request archive switch (Jorben on Discord). An unchanged
 // file is a 304.
+//
+// The page itself names each of its scripts and styles with its content's
+// hash (app.js?v=…), so a cache that kept a file from before these headers
+// were sent, and goes on serving it whatever magpie says now, is never asked
+// for it again: a Docker user behind an HTTPS proxy had v0.1.630's page run
+// v0.1.582's app.js and routing.js (incognito and a hard refresh alike),
+// whose first lines looked for an element the page no longer had, and the
+// page was blank under its tabs.
 func revalidated(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		if name == "" {
 			name = "index.html"
 		}
-		if b, err := fs.ReadFile(staticFS(), name); err == nil {
-			sum := sha256.Sum256(b)
-			rw.Header().Set("ETag", `"`+hex.EncodeToString(sum[:12])+`"`)
-			rw.Header().Set("Cache-Control", "no-cache")
+		b, err := fs.ReadFile(staticFS(), name)
+		if err != nil {
+			next.ServeHTTP(rw, r)
+			return
+		}
+		if r.URL.Path == "/" {
+			b = versionedPage(b)
+		}
+		sum := sha256.Sum256(b)
+		rw.Header().Set("ETag", `"`+hex.EncodeToString(sum[:12])+`"`)
+		rw.Header().Set("Cache-Control", "no-cache")
+		if r.URL.Path == "/" {
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			http.ServeContent(rw, r, "index.html", time.Time{}, bytes.NewReader(b))
+			return
 		}
 		next.ServeHTTP(rw, r)
+	})
+}
+
+// pageFile is a script or stylesheet of the page's own, named in it.
+var pageFile = regexp.MustCompile(`(src|href)="([A-Za-z0-9_.-]+\.(?:js|css))"`)
+
+// versionedPage is the page with each of its own scripts and stylesheets
+// named with its content's hash; one not among the page's files (boot.js,
+// which the API writes) keeps its name.
+func versionedPage(page []byte) []byte {
+	return pageFile.ReplaceAllFunc(page, func(m []byte) []byte {
+		g := pageFile.FindSubmatch(m)
+		b, err := fs.ReadFile(staticFS(), string(g[2]))
+		if err != nil {
+			return m
+		}
+		sum := sha256.Sum256(b)
+		return []byte(fmt.Sprintf(`%s="%s?v=%s"`, g[1], g[2], hex.EncodeToString(sum[:6])))
 	})
 }
 
@@ -488,6 +570,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			err = a.Reapply()
 		case "keep":
 			a.Keep()
+		case "disconnect":
+			err = a.Disconnect()
 		default:
 			http.NotFound(rw, r)
 			return
@@ -596,6 +680,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
+		in.GitHubToken = cur.GitHubToken                 // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
 		in.RedactRules = cur.RedactRules                 // the masking rules, set on their own
@@ -618,6 +703,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if v := strings.TrimSpace(in.ImageGen); v != "" && v != "off" && v != cur.ImageGen {
 			if _, _, ok := provider.Resolve(v); !ok {
 				fail(rw, fmt.Errorf("no model %s to generate images", v))
+				return
+			}
+		}
+		if v := strings.TrimSpace(in.Searcher); v != "" && v != cur.Searcher {
+			id, _, _ := strings.Cut(v, "/")
+			if !slices.ContainsFunc(gateway.Searchers(), func(c gateway.SearcherChoice) bool { return c.Provider.ID == id }) {
+				fail(rw, fmt.Errorf("%s can't search the web for other models", id))
 				return
 			}
 		}
@@ -816,6 +908,29 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// the GitHub token the library's requests to GitHub carry: set, or
+	// taken away with ""
+	mux.HandleFunc("POST /api/settings/github-token", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		tok := strings.TrimSpace(in.Token)
+		if strings.ContainsFunc(tok, func(c rune) bool { return c <= ' ' || c == 0x7f }) {
+			fail(rw, fmt.Errorf("a GitHub token is one word, without spaces"))
+			return
+		}
+		s := settings.Load()
+		s.GitHubToken = tok
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// a web search API added, given a new key or address, or taken away
 	mux.HandleFunc("POST /api/settings/search-api", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -893,6 +1008,7 @@ func state() stateJSON {
 		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.Path), Fields: agentFields(a, vals)}
 		aj.Models = agentModelCount(a.ID, aj.Fields)
 		aj.Drift = a.Drift()
+		aj.Wired = a.Wired()
 		if a.Import != nil {
 			aj.Import, aj.Added = a.Import(), a.Added != nil && a.Added()
 		}

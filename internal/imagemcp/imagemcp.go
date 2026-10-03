@@ -37,8 +37,23 @@ const (
 )
 
 const (
-	tool      = "generate_image"
-	videoTool = "generate_video"
+	tool       = "generate_image"
+	videoTool  = "generate_video"
+	resultTool = "generation_result"
+)
+
+// answerWithin is how long a tool call waits for its image or video before
+// it answers that it is still being made, with the job's id to ask after
+// it by. Agents give a tool call as little as 30 s (#575: ZCode's "Tool
+// execution timed out after 30000ms", the MCP SDK's 60 s "Request timed
+// out") and then call it again, though an image model often takes a
+// minute or more: so no call of this server outlasts the shortest of them,
+// and a job goes on after its call has answered, saving what it makes.
+// progressEvery is how often a call that was given a progressToken is
+// told the job is still going, for clients that wait longer on progress.
+var (
+	answerWithin  = 20 * time.Second
+	progressEvery = 5 * time.Second
 )
 
 // How often a video is asked after, and how long it is waited for.
@@ -51,7 +66,7 @@ var videoSchema = map[string]any{
 	"name": videoTool,
 	"description": "Generate a short video from a text prompt, optionally starting from an image to animate, with a Grok subscription signed in to Magpie " +
 		"(it has no other video model yet). It takes from ten seconds to a few minutes, then the video is saved as an mp4 file in the project (" + VideoFolder +
-		"/ unless path says where) and its path is returned. Describe the subject, the motion and the camera: what moves, how, and what the shot is.",
+		"/ unless path says where) and its path is returned; when it is not ready within about 20 seconds, the answer is an id to wait on with " + resultTool + " instead. Describe the subject, the motion and the camera: what moves, how, and what the shot is.",
 	"inputSchema": map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -66,10 +81,23 @@ var videoSchema = map[string]any{
 	},
 }
 
+var resultSchema = map[string]any{
+	"name": resultTool,
+	"description": "Wait for an image or video that " + tool + " or " + videoTool + " said is still being made, by the id it gave, and get where it was saved. " +
+		"It answers within about " + strconv.Itoa(int(answerWithin/time.Second)) + " seconds: if it is still not ready, call this again with the same id (don't generate it again).",
+	"inputSchema": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string", "description": "The id " + tool + " or " + videoTool + " answered with."},
+		},
+		"required": []string{"id"},
+	},
+}
+
 var schema = map[string]any{
 	"name": tool,
 	"description": "Generate an image from a text prompt, or edit/combine images given as reference_images, with the image model set in Magpie. " +
-		"The image is saved as a file in the project (" + Folder + "/ unless path says where) and its path is returned; " +
+		"The image is saved as a file in the project (" + Folder + "/ unless path says where) and its path is returned (when it is not ready within about 20 seconds, the answer is an id to wait on with " + resultTool + " instead); " +
 		"reference it from code or docs by that path. Write a detailed prompt: subject, style, composition, colours, any text to render exactly.",
 	"inputSchema": map[string]any{
 		"type": "object",
@@ -106,13 +134,78 @@ type server struct {
 	roots    bool   // the client can say its roots
 	pending  map[string]chan rpc
 	nextCall int
+	jobs     map[string]*job
+	nextJob  int
+	running  sync.WaitGroup
 }
 
-// ToolTimeout is how long an agent has to wait for a tool of this server:
-// generate_video waits up to videoWait for its video, and a minute more.
-// Agents that cut a tool call short (Codex's default is a minute) are given
-// it in their config, or they would give up on a video that is still being
-// made and ask for it again.
+// job is one image or video being made: it runs to its end whether or not
+// the call that started it is still waiting.
+type job struct {
+	id, tool string
+	started  time.Time
+	done     chan struct{}
+	text     string
+	err      error
+}
+
+// start runs run as a job of tool.
+func (s *server) start(tool string, run func() (string, error)) *job {
+	s.mu.Lock()
+	if s.jobs == nil {
+		s.jobs = map[string]*job{}
+	}
+	s.nextJob++
+	j := &job{id: fmt.Sprintf("%s-%d-%d", strings.TrimPrefix(tool, "generate_"), os.Getpid(), s.nextJob), tool: tool, started: time.Now(), done: make(chan struct{})}
+	s.jobs[j.id] = j
+	s.mu.Unlock()
+	s.running.Add(1)
+	go func() {
+		defer s.running.Done()
+		j.text, j.err = run()
+		close(j.done)
+	}()
+	return j
+}
+
+// await waits up to answerWithin for j, telling the client it is still
+// going every progressEvery when it gave a progressToken; false when j is
+// still running.
+func (s *server) await(j *job, progressToken json.RawMessage) bool {
+	limit := time.NewTimer(answerWithin)
+	defer limit.Stop()
+	tick := time.NewTicker(progressEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-j.done:
+			return true
+		case <-limit.C:
+			return false
+		case <-tick.C:
+			if len(progressToken) > 0 && string(progressToken) != "null" {
+				s.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress", "params": map[string]any{
+					"progressToken": progressToken, "progress": int(time.Since(j.started) / time.Second),
+					"message": "still being made (" + j.id + ")"}})
+			}
+		}
+	}
+}
+
+// stillGoing is the answer of a call whose job outlasted it.
+func stillGoing(j *job) string {
+	what, where := "image", Folder
+	if j.tool == videoTool {
+		what, where = "video", VideoFolder
+	}
+	return fmt.Sprintf("The %s is still being made (%d s so far; it can take a few minutes). It goes on without this call and will be saved in the project (%s/ unless path said where). "+
+		"Don't ask for it again: call %s with id %q to wait for it and get its path.\n", what, int(time.Since(j.started)/time.Second), where, resultTool, j.id)
+}
+
+// ToolTimeout is how long a job of this server may run: generate_video
+// waits up to videoWait for its video, and a minute more. A call answers
+// within answerWithin all the same; the agents whose config takes it
+// (Codex, Goose) are still given it, as a call's ceiling.
 func ToolTimeout() time.Duration { return videoWait + time.Minute }
 
 // Run serves MCP on stdin/stdout until stdin closes.
@@ -125,7 +218,15 @@ func Run(args []string) error {
 		base = gateway.URL()
 	}
 	s := &server{gateway: base, client: &http.Client{Timeout: 6 * time.Minute}, enc: json.NewEncoder(os.Stdout), agent: gateway.DrawAgent, pending: map[string]chan rpc{}}
-	return s.serve(os.Stdin)
+	err := s.serve(os.Stdin)
+	// what is still being made is saved, though the agent has gone
+	done := make(chan struct{})
+	go func() { s.running.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(ToolTimeout()):
+	}
+	return err
 }
 
 func (s *server) send(v any) {
@@ -199,26 +300,48 @@ func (s *server) handle(req rpc) {
 	case "ping":
 		result = map[string]any{}
 	case "tools/list":
-		result = map[string]any{"tools": []any{schema, videoSchema}}
+		result = map[string]any{"tools": []any{schema, videoSchema, resultSchema}}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
+			Meta      struct {
+				ProgressToken json.RawMessage `json:"progressToken"`
+			} `json:"_meta"`
 		}
-		if err := json.Unmarshal(req.Params, &p); err != nil || (p.Name != tool && p.Name != videoTool) {
+		if err := json.Unmarshal(req.Params, &p); err != nil || (p.Name != tool && p.Name != videoTool && p.Name != resultTool) {
 			rpcErr = map[string]any{"code": -32602, "message": "unknown tool " + p.Name}
 			break
 		}
-		generate := s.generate
-		if p.Name == videoTool {
-			generate = s.film
+		var j *job
+		if p.Name == resultTool {
+			var a struct {
+				ID string `json:"id"`
+			}
+			json.Unmarshal(p.Arguments, &a)
+			s.mu.Lock()
+			j = s.jobs[strings.TrimSpace(a.ID)]
+			s.mu.Unlock()
+			if j == nil {
+				result = map[string]any{"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("no image or video is being made as %q (magpie-image may have been restarted): look in the project's %s/ or %s/, or generate it again", a.ID, Folder, VideoFolder)}}, "isError": true}
+				break
+			}
+		} else {
+			generate := s.generate
+			if p.Name == videoTool {
+				generate = s.film
+			}
+			j = s.start(p.Name, func() (string, error) { return generate(p.Arguments) })
 		}
-		text, err := generate(p.Arguments)
-		if err != nil {
-			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": err.Error()}}, "isError": true}
+		if !s.await(j, p.Meta.ProgressToken) {
+			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": stillGoing(j)}}}
 			break
 		}
-		result = map[string]any{"content": []any{map[string]any{"type": "text", "text": text}}}
+		if j.err != nil {
+			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": j.err.Error()}}, "isError": true}
+			break
+		}
+		result = map[string]any{"content": []any{map[string]any{"type": "text", "text": j.text}}}
 	default:
 		rpcErr = map[string]any{"code": -32601, "message": "method not found"}
 	}

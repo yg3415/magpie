@@ -46,7 +46,11 @@ func closeStep(goos string, fullscreen bool) closeAction {
 // hideMain hides the main window, and takes magpie out of the Dock if it is
 // there only while the window is shown.
 func (h *host) hideMain() {
-	h.main.Hide()
+	application.InvokeSync(func() {
+		if h.main != nil {
+			h.main.Hide()
+		}
+	})
 	h.dock(settings.Load(), false)
 }
 
@@ -55,7 +59,11 @@ func (h *host) hideMain() {
 // system refused to leave), it is hidden after a while all the same.
 func (h *host) leaveFullscreenThenHide() {
 	h.closing.Store(true)
-	h.main.UnFullscreen()
+	application.InvokeSync(func() {
+		if h.main != nil {
+			h.main.UnFullscreen()
+		}
+	})
 	time.AfterFunc(3*time.Second, func() {
 		if h.closing.Swap(false) {
 			application.InvokeAsync(h.hideMain)

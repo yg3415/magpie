@@ -43,9 +43,10 @@ type Part struct {
 	Args json.RawMessage // a JSON object
 
 	// tool_result
-	CallID  string
-	IsError bool
-	Images  []Part // the images the tool returned beside its text
+	CallID     string
+	IsError    bool
+	Images     []Part         // the images the tool returned beside its text
+	Standalone map[string]any // native Responses notification with no call ID
 
 	// thinking
 	Signature string
@@ -139,10 +140,12 @@ type Request struct {
 // nsTool is a tool as a Responses client knows it: by its namespace and its
 // name in it (Codex's collaboration.spawn_agent). Search is Codex's own
 // tool search, offered to the model as a function and handed back as the
-// tool_search_call Codex runs.
+// tool_search_call Codex runs. Custom is a custom (freeform) tool, offered
+// as a function taking its input, its call handed back as the
+// custom_tool_call Codex runs.
 type nsTool struct {
 	Namespace, Name string
-	Search          bool
+	Search, Custom  bool
 }
 
 // EventKind is what a streamed event carries.
@@ -159,6 +162,7 @@ const (
 	KUsage                      // Usage
 	KError                      // Text
 	KSearch                     // Text (the query), Hits: a web search run for the model
+	KImage                      // Name (media type), Text (base64): an image the model made
 )
 
 // Event is one thing a streaming reply said.
@@ -308,6 +312,9 @@ func (c *collector) add(ev Event) {
 	case KSearch:
 		c.closeTool()
 		c.res.Parts = append(c.res.Parts, Part{Kind: Search, Text: ev.Text, Hits: ev.Hits})
+	case KImage:
+		c.closeTool()
+		c.res.Parts = append(c.res.Parts, Part{Kind: Image, MediaType: ev.Name, Data: ev.Text})
 	}
 }
 

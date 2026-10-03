@@ -1,5 +1,14 @@
 package qoder
 
+// PLUGIN-SERVED (see AGENTS.md): Qoder ("qoder") and Qoder CN ("qoder-cn")
+// are deprecated built-in subscriptions served by their plugin,
+// @magpie-community/opencode-qoder-auth, each once moved onto it
+// (provider.Moved; the default for a new sign-in). A moved one's
+// sign-ins, models, requests and usage are all the plugin's, never this
+// code's (only the move, in migrate*.go, still reads its accounts). A fix here alone doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/qoder) and raise the
+// movers' min in internal/provider/migrate_qoder.go.
+
 import (
 	"context"
 	"encoding/json"
@@ -30,19 +39,52 @@ type ModelInfo struct {
 	AlwaysThinks  bool   `json:"-"`
 	DefaultEffort string `json:"-"`
 	// Free is set on a model that costs the plan no credits, as Qoder's
-	// client reads it: is_free, or a price_factor of 0.
+	// client shows it: a price_factor of 0 (see free).
 	Free bool `json:"-"`
+	// Rate is the credits a request costs, as a multiple (its
+	// price_factor), and RateWas the price struck through beside it while
+	// a discount runs (see free); 0 when the listing says none.
+	Rate    float64 `json:"-"`
+	RateWas float64 `json:"-"`
 }
 
-// free reads whether the listing marks a model free: is_free true, or a
-// price_factor (the credits a request costs, as a multiple) of 0. Either
-// may come in snake or camel case.
+// promotion is a listing entry's running discount: a price_factor of 0
+// while it is active, with a price before it, is a discount, not a free
+// model.
+type promotion struct {
+	Active    bool     `json:"active"`
+	Before    *float64 `json:"before_promotion_price_factor"`
+	BeforeC   *float64 `json:"beforePromotionPriceFactor"`
+	Discount  float64  `json:"discount_factor"`
+	DiscountC float64  `json:"discountFactor"`
+}
+
+// free reads whether a model costs the plan no credits: a price_factor (the
+// credits a request costs, as a multiple; priceFactor in camel case) of 0,
+// the price Qoder's own client shows ("0×"). is_free is no word on that:
+// Qoder's listing has it true on Qwen3.8-Max at 0.5×, an off-peak discount
+// (错峰 4 折) on it, and Qoder's client shows the price, not it. It is taken
+// only from a listing with no price at all. A price of 0 for the while an
+// active promotion lasts, with a price before it, is a discount, not a free
+// model; a limited-time free model (Qwen3.8-Flash: 0×, its
+// original_price_factor 0.1 struck through) is free while it is. The same
+// rule as the plugin's freeOf (packages/qoder/index.mjs).
+//
+// The price is kept too (Rate), as Qoder's client shows it beside the
+// model: 0.5×, and the price before a discount struck through (RateWas):
+// an active promotion's before_promotion_price_factor, else an
+// original_price_factor above the price. A promotion's 0 that isn't free
+// is its price before times its discount_factor.
 func (m *ModelInfo) free(raw json.RawMessage) {
 	var v struct {
-		IsFree      *bool    `json:"is_free"`
-		IsFreeC     *bool    `json:"isFree"`
-		PriceFactor *float64 `json:"price_factor"`
-		PriceC      *float64 `json:"priceFactor"`
+		IsFree      *bool      `json:"is_free"`
+		IsFreeC     *bool      `json:"isFree"`
+		PriceFactor *float64   `json:"price_factor"`
+		PriceC      *float64   `json:"priceFactor"`
+		Original    float64    `json:"original_price_factor"`
+		OriginalC   float64    `json:"originalPriceFactor"`
+		Promotion   *promotion `json:"promotion"`
+		PromotionT  *promotion `json:"prommotion"`
 	}
 	if json.Unmarshal(raw, &v) != nil {
 		return
@@ -53,7 +95,32 @@ func (m *ModelInfo) free(raw json.RawMessage) {
 	if v.PriceFactor == nil {
 		v.PriceFactor = v.PriceC
 	}
-	m.Free = v.IsFree != nil && *v.IsFree || v.PriceFactor != nil && *v.PriceFactor == 0
+	if v.Promotion == nil {
+		v.Promotion = v.PromotionT
+	}
+	if v.PriceFactor != nil {
+		p := v.Promotion
+		if p != nil && p.Before == nil {
+			p.Before = p.BeforeC
+		}
+		if p != nil && p.Discount == 0 {
+			p.Discount = p.DiscountC
+		}
+		discounted := p != nil && p.Active && p.Before != nil && *p.Before > 0
+		m.Rate, m.RateWas = max(*v.PriceFactor, 0), max(v.Original, v.OriginalC)
+		if discounted {
+			m.RateWas = *p.Before
+			if m.Rate == 0 {
+				m.Rate = *p.Before * p.Discount
+			}
+		}
+		if m.RateWas <= m.Rate {
+			m.RateWas = 0
+		}
+		m.Free = *v.PriceFactor == 0 && !discounted
+		return
+	}
+	m.Free = v.IsFree != nil && *v.IsFree
 }
 
 // effortOrder ranks Qoder's effort names, lowest first.
@@ -167,7 +234,8 @@ func ParseModels(body []byte, provider string) ([]catalog.Model, error) {
 			name = m.Key
 		}
 		out = append(out, catalog.Model{ID: m.Key, Name: name, Provider: provider,
-			Context: m.MaxInputTokens, Images: m.IsVL, Efforts: m.Efforts, Free: m.Free})
+			Context: m.MaxInputTokens, Images: m.IsVL, Efforts: m.Efforts, Free: m.Free,
+			Rate: m.Rate, RateWas: m.RateWas})
 	}
 	return out, nil
 }

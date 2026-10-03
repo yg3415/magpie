@@ -1,5 +1,14 @@
 package provider
 
+// PLUGIN-SERVED (see AGENTS.md): Devin ("devin") is a deprecated built-in
+// subscription served by its plugin, @magpie-community/opencode-devin-auth,
+// once moved onto it (provider.Moved; the default for a new sign-in). A
+// moved one's sign-ins, models, requests and usage are all the plugin's,
+// never this code's (only the move, in migrate*.go, still reads its
+// accounts). A fix here alone doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/devin) and raise the
+// mover's min in internal/provider/migrate_side.go.
+
 // A Devin subscription is served through the API the devin CLI talks to
 // (gateway/devin.go), with the key the CLI signed in with; here is who that
 // account is, the models it offers, and the sign-in, which is `devin auth
@@ -899,6 +908,35 @@ func devinTierOf(id string) (tier, level string) {
 		}
 	}
 	return "", devinLevel(id)
+}
+
+// devinBase is the model a Devin variant id is a variant of: the id less
+// its tier and effort words (claude-opus-5-5-low-fast is claude-opus-5-5,
+// swe-2-high swe-2); an id at no effort is itself.
+func devinBase(id string) string {
+	tier, level := devinTierOf(id)
+	if level == "" {
+		return id
+	}
+	low := strings.ToLower(id)
+	cut := func(word string) bool {
+		for _, sep := range []string{"-", "_"} {
+			if strings.HasSuffix(low, sep+word) {
+				low, id = low[:len(low)-len(sep+word)], id[:len(low)-len(sep+word)]
+				return true
+			}
+		}
+		return false
+	}
+	if tier != "" {
+		cut(tier)
+	}
+	for _, l := range devinLevels {
+		if l.level == level && cut(l.word) {
+			break
+		}
+	}
+	return id
 }
 
 // devinEffortOf is the effort a Devin id runs at, in a tier or not.
