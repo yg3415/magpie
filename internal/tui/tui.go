@@ -773,6 +773,10 @@ func (m model) viewList() string {
 			name = sNameOn.Render(padRight(a.Name, nameW))
 		}
 		line := pad + marker + name + "  "
+		// Claude Code on its own subscription, through magpie as it is
+		if a.Passthrough != nil && a.Passthrough() {
+			line += sMuted.Render("subscription passthrough") + " "
+		}
 		for j, f := range a.Fields {
 			v := m.values[i][f.Key]
 			if v == "" && f.Quiet && !(sel && j == m.col) {
