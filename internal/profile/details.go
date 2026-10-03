@@ -131,6 +131,13 @@ func Details(p Profile) []Group {
 				add(f.Key, f.Label, v)
 			}
 		}
+		// subscription passthrough, said only where it is on
+		if v, ok := vals[PassthroughKey]; ok {
+			seen[PassthroughKey] = true
+			if v == "on" {
+				add(PassthroughKey, "Subscription passthrough", "on")
+			}
+		}
 		var rest []string
 		for k := range vals {
 			if !seen[k] {

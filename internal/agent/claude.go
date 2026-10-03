@@ -16,6 +16,8 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+
+	"github.com/yetone/magpie/scripts"
 )
 
 // Claude Code reads its endpoint from the `env` block of settings.json.
@@ -892,8 +894,16 @@ func claudeIn(at place) *Agent {
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had
-		Unwire:         unwire,
-		Passthrough:    passthrough,
+		Unwire:      unwire,
+		Passthrough: passthrough,
+		// through passthrough, Claude Code started by magpie's launcher,
+		// which picks the account it runs as
+		Launch: func() string {
+			if !passthrough() || at.id != "" {
+				return ""
+			}
+			return `PATH="` + scripts.LauncherDir() + `:$PATH" claude`
+		},
 		SetPassthrough: setPassthrough,
 		PassthroughSet: func() bool { return stashLoad()[passthroughKey] != "" },
 		// the catalog's models, with their levels, as Claude Code is told

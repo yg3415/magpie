@@ -1,15 +1,18 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/scripts"
 )
 
 // passthroughSettings puts settings.json before in a home of the test's own,
@@ -97,6 +100,14 @@ func TestClaudePassthrough(t *testing.T) {
 			if d := a.Drift(); d != nil {
 				t.Fatalf("drift right after: %+v", d)
 			}
+			// the launcher is there to start Claude Code through, and the
+			// command to start it so is offered
+			if b, err := os.ReadFile(filepath.Join(scripts.LauncherDir(), "claude")); err != nil || !bytes.Equal(b, scripts.ClaudeLauncher) {
+				t.Fatalf("launcher: %v", err)
+			}
+			if l := a.Launch(); !strings.Contains(l, scripts.LauncherDir()) || !strings.HasSuffix(l, " claude") {
+				t.Fatalf("launch: %q", l)
+			}
 			if err := a.Disconnect(); err != nil {
 				t.Fatal(err)
 			}
@@ -167,7 +178,9 @@ func TestClaudePassthroughPicks(t *testing.T) {
 func TestClaudePassthroughDrift(t *testing.T) {
 	for name, change := range map[string]func(path string) error{
 		"endpoint gone": func(path string) error { return edit.DelJSON(path, "env.ANTHROPIC_BASE_URL") },
-		"token added":   func(path string) error { return edit.SetJSON(path, edit.KV{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: "sk-x"}) },
+		"token added": func(path string) error {
+			return edit.SetJSON(path, edit.KV{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: "sk-x"})
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			home, path, _ := passthroughSettings(t, `{}`)

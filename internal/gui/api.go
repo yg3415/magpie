@@ -90,6 +90,11 @@ type agentJSON struct {
 	Drift *agent.Drift `json:"drift,omitempty"`
 	// Wired: magpie is in its config, which its menu's Disconnect takes out
 	Wired bool `json:"wired,omitempty"`
+	// CanPassthrough: it can be wired for subscription passthrough (Claude
+	// Code); Passthrough: it is now — its own requests, on its own sign-in,
+	// through the gateway as they are
+	CanPassthrough bool `json:"canPassthrough,omitempty"`
+	Passthrough    bool `json:"passthrough,omitempty"`
 	// Import: an app that takes magpie by its own link (Cindy), and
 	// whether it has magpie already
 	Import string `json:"import,omitempty"`
@@ -572,6 +577,10 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			a.Keep()
 		case "disconnect":
 			err = a.Disconnect()
+		case "passthrough-on":
+			err = a.UsePassthrough(true)
+		case "passthrough-off":
+			err = a.UsePassthrough(false)
 		default:
 			http.NotFound(rw, r)
 			return
@@ -1009,6 +1018,7 @@ func state() stateJSON {
 		aj.Models = agentModelCount(a.ID, aj.Fields)
 		aj.Drift = a.Drift()
 		aj.Wired = a.Wired()
+		aj.CanPassthrough, aj.Passthrough = a.SetPassthrough != nil, a.Passthrough != nil && a.Passthrough()
 		if a.Import != nil {
 			aj.Import, aj.Added = a.Import(), a.Added != nil && a.Added()
 		}

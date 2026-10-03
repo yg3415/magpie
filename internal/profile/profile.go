@@ -117,8 +117,24 @@ func Fields() map[string]string {
 		for k, v := range a.Values() {
 			p[a.ID+"."+k] = v
 		}
+		// how Claude Code is wired beside its fields: subscription
+		// passthrough or not
+		if a.Passthrough != nil {
+			p[a.ID+"."+PassthroughKey] = onOff(a.Passthrough())
+		}
 	}
 	return p
+}
+
+// PassthroughKey is the field a profile keeps an agent's subscription
+// passthrough under, "on" or "off": no field of the agent's own.
+const PassthroughKey = "passthrough"
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 // Snapshot captures every detected agent's fields, and the library's setup
@@ -202,6 +218,9 @@ func ApplyFields(p map[string]string) (int, error) {
 			return 0
 		case strings.HasSuffix(k, ".model"):
 			return 1
+		case strings.HasSuffix(k, "."+PassthroughKey):
+			// after the models, which may take it out
+			return 3
 		}
 		return 2
 	}
@@ -221,6 +240,16 @@ func ApplyFields(p map[string]string) (int, error) {
 		id, field := k[:i], k[i+1:]
 		a := agents[id]
 		if a == nil {
+			continue
+		}
+		if field == PassthroughKey {
+			if a.Passthrough == nil || a.Passthrough() == (p[k] == "on") {
+				continue
+			}
+			if err := a.UsePassthrough(p[k] == "on"); err != nil {
+				return changed, err
+			}
+			changed++
 			continue
 		}
 		f := a.Field(field)

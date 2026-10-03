@@ -43,6 +43,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent> <model>          set an agent's model   e.g. magpie claude deepseek/deepseek-chat
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
   magpie <agent> [field] default  back to the agent's own default, magpie's wiring removed
+  magpie claude passthrough [on|off]   Claude Code on its own subscription, its requests through magpie as they are
 
   magpie save <name>              snapshot every agent's settings as a profile
   magpie use <name>               apply a profile
@@ -291,6 +292,9 @@ func run(args []string) error {
 			return nil
 		}
 	}
+	if len(args) >= 2 && args[1] == "passthrough" {
+		return passthroughCmd(a, args[2:])
+	}
 	switch len(args) {
 	case 1:
 		return list([]*agent.Agent{a}, true, -1)
@@ -313,8 +317,46 @@ func run(args []string) error {
 	return fmt.Errorf("too many arguments\n\n%s", usage)
 }
 
+// passthroughCmd says whether an agent passes its own requests through
+// magpie on its own subscription, or turns that on or off.
+func passthroughCmd(a *agent.Agent, args []string) error {
+	if a.SetPassthrough == nil {
+		return fmt.Errorf("%s has no subscription passthrough", a.Name)
+	}
+	if len(args) == 0 {
+		state := "off"
+		if a.Passthrough() {
+			state = "on"
+		}
+		fmt.Println(bold.Render(a.Name), muted.Render("subscription passthrough"), state)
+		return nil
+	}
+	if len(args) > 1 || (args[0] != "on" && args[0] != "off") {
+		return fmt.Errorf("magpie %s passthrough [on|off]", a.ID)
+	}
+	on := args[0] == "on"
+	if err := a.UsePassthrough(on); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), bold.Render(a.Name), muted.Render("subscription passthrough"), args[0])
+	if on && a.Launch != nil {
+		if l := a.Launch(); l != "" {
+			fmt.Println(muted.Render("  start it through magpie's launcher, which picks the account: " + l))
+		}
+	}
+	if a.Notice != nil {
+		if n := a.Notice(); n != "" {
+			fmt.Println(muted.Render("  ↻ " + n))
+		}
+	}
+	return nil
+}
+
 func set(a *agent.Agent, key, value string) error {
 	f := a.Field(key)
+	if f != nil && key == a.Fields[0].Key && value == "" && a.Passthrough != nil && a.Passthrough() {
+		fmt.Println(muted.Render("  " + a.Name + "'s default takes it off subscription passthrough too"))
+	}
 	if f == nil {
 		var keys []string
 		for _, f := range a.Fields {
@@ -417,6 +459,9 @@ func list(agents []*agent.Agent, detectedOnly bool, dimFrom int) error {
 				} else {
 					parts = append(parts, label.Render(f.Label)+" "+v)
 				}
+			}
+			if a.Passthrough != nil && a.Passthrough() {
+				parts = append([]string{value.Render("subscription passthrough")}, parts...)
 			}
 			r.name = bold.Render(a.Name)
 			if dim {

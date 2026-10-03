@@ -14,6 +14,8 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
+
+	"github.com/yetone/magpie/scripts"
 )
 
 // An agent's config is a file anyone can write: another switcher, an
@@ -411,5 +413,11 @@ func (a *Agent) UsePassthrough(on bool) error {
 		return err
 	}
 	a.Keep()
+	if on {
+		// the launcher Claude Code starts through, as this magpie has it
+		if _, err := scripts.InstallClaudeLauncher(); err != nil {
+			return fmt.Errorf("magpie's launcher for %s couldn't be written: %w", a.Name, err)
+		}
+	}
 	return nil
 }
