@@ -236,6 +236,8 @@
 
   // why routing put the first where it did
   function firstWhy(r) {
+    // Claude Code's own request: its account was chosen when it started
+    if (r.passthrough) return t("Claude Code's own request, on its own Claude subscription: passed to Anthropic unchanged, on {who}, the account it runs as.", { who: r.pinned || t("the account it is signed in to") });
     const f = r.order[0];
     if (!f) return t("Nothing could take {model}.", { model: r.model });
     const w = who(f);
@@ -1156,6 +1158,7 @@
     collab_spawn: "Subagent", thread_spawn: "Subagent", agent_job: "Subagent",
     luna_reserve: "Luna Reserve",
     web_search: "Web search",
+    "claude-launch": "Claude Code launch",
   };
   const kindName = (k) => KIND[k] ? t(KIND[k]) : k;
   function kindTag(r) {
@@ -1185,6 +1188,7 @@
   window.routedWhy = routedWhy;
   function kindWhy(r) {
     const agent = agentName(r.agent);
+    if (r.kind === "claude-launch") return t("Claude Code was opened through magpie's launcher, and magpie picked the Claude account it runs as, as Routing says. It keeps that account until it exits.");
     if (r.kind === "luna_reserve") return t("{agent} sent this turn on Luna Reserve, which it turns to once the plan's own allowance is used up; it picks the model itself.", { agent });
     if (r.kind === "web_search") return r.for
       ? t("magpie ran this web search for {agent}'s {model}, which can't search the web by itself: {searcher} searched, and {model} goes on answering once it has what was found. Not a turn of the conversation.", { agent: agentName(r.for.agent), model: r.for.model, searcher: r.model })
@@ -1426,6 +1430,12 @@
     sw.style.setProperty("--agent", hueOf(r.agent));
     asked.append(sw, icon(ag?.icon || "generic"), el("span", "m", r.model));
     if (r.kind) { asked.classList.add("kinded"); asked.append(kindTag(r)); }
+    if (r.passthrough) {
+      const k = el("span", "kind", t("Passthrough"));
+      k.title = t("Claude Code's own request on its own Claude subscription, passed to Anthropic unchanged and not masked");
+      asked.classList.add("kinded");
+      asked.append(k);
+    }
     // the reasoning the model was sent at — the turn's pick, or the
     // agent's fitted to the model's levels — after the one the agent
     // asked for when that was another (xhigh → max), so a level the

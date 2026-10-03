@@ -202,10 +202,10 @@ settings.json 的 `env` 对所有 Claude Code 会话生效，启动器设置的�
 
 | 编号 | 前置 / 操作 | 预期 | 方式 |
 |---|---|---|---|
-| M1 | Claude Code 未接入；在代理页把它切到订阅直通 | settings.json 的 `env` 只多出 `ANTHROPIC_BASE_URL`（指向网关），没有 token 和模型名；用户原有的其他设置不变；代理页显示「订阅直通」，模型选择器和档位只读 | 自动 |
+| M1 | Claude Code 未接入；在代理页把它切到订阅直通 | settings.json 的 `env` 只多出 `ANTHROPIC_BASE_URL`（指向网关），没有 token 和模型名；用户原有的其他设置不变；代理页显示「订阅直通」标记，并提供启动器命令 | 自动 |
 | M2 | Claude Code 处于模型接入；切到订阅直通 | magpie 写入的 token、模型名、`model` 都被去掉，只留 `ANTHROPIC_BASE_URL` | 自动 |
 | M3 | 订阅直通；切回模型接入并选一个 magpie 模型 | 恢复模型接入的写法；先弹确认「将退出订阅直通」 | 自动 |
-| M4 | 订阅直通；在选择器里选 Claude 原生模型或「默认」 | 先弹确认；确认后退出订阅直通；取消则 settings.json 不变 | 自动 |
+| M4 | 订阅直通；在选择器里选 Claude 原生模型 / 选「默认」或 magpie 模型 | 选原生模型：仍是订阅直通，只换模型。选「默认」或 magpie 模型：先弹确认，确认后退出订阅直通；取消则 settings.json 不变 | 自动 |
 | M5 | 订阅直通；「断开 magpie」 | settings.json 恢复到接入前的样子（和现有断开一致）；代理页显示未接入 | 自动 |
 | M6 | 订阅直通；手动从 settings.json 删掉 `ANTHROPIC_BASE_URL`，或加回 `ANTHROPIC_AUTH_TOKEN` | 代理页出现漂移提示，说明订阅直通已失效，可以一键恢复 | 自动 |
 | M7 | 订阅直通；effort 改为 high | effort 照常生效，仍是订阅直通 | 自动 |
@@ -275,8 +275,8 @@ settings.json 的 `env` 对所有 Claude Code 会话生效，启动器设置的�
 
 | 位置 | 现状 | 改动 |
 |---|---|---|
-| **代理页 · Claude Code 行**（`renderAgents` / `agentRow`，app.js 232–409；API `agentJSON`、`/api/set`、`/api/agents/{action}/{id}`） | 只有模型、effort、档位等字段；接入状态由 `wired` 判断 | 新增接入模式选择（模型接入 / 订阅直通 / 不接入）；订阅直通时模型选择器和档位改为只读或隐藏，显示「订阅直通」标记；effort 保留（它不属于模型接入） |
-| **代理页 · 模型选择器**（`openPicker` 2060，`foldSame` 2038，「默认」2079，「断开 magpie」2083） | 选原生模型、默认或 magpie 模型都会改写 settings.json | 订阅直通时，这三种操作要先确认「将退出订阅直通」 |
+| **代理页 · Claude Code 行**（`renderAgents` / `agentRow`，app.js 232–409；API `agentJSON`、`/api/set`、`/api/agents/{action}/{id}`） | 只有模型、effort、档位等字段；接入状态由 `wired` 判断 | 新增接入模式选择（模型接入 / 订阅直通 / 不接入）；订阅直通时仍可选 Anthropic 的模型和 effort（保持直通），名称旁显示「订阅直通」标记 |
+| **代理页 · 模型选择器**（`openPicker` 2060，`foldSame` 2038，「默认」2079，「断开 magpie」2083） | 选原生模型、默认或 magpie 模型都会改写 settings.json | 订阅直通时，选「默认」或 magpie 模型要先确认「将退出订阅直通」；选 Anthropic 的模型保持直通 |
 | **代理页 · 行菜单**（`openAgentMenu` 1378–1399） | 「重新应用」「保留当前设置」「断开 magpie」只在 `wired` 时出现 | 增加切换到订阅直通 / 切回模型接入；「断开 magpie」覆盖订阅直通 |
 | **代理页 · 断开确认框**（`askDisconnect` 726） | 文案是「端点、密钥、模型和 effort」 | 增加订阅直通版本的文案 |
 | **代理页 · 配置漂移提示**（`driftFix` 698，`DRIFT_WHY` 710–714；后端 `Drift()`） | 只检测 magpie 模型被改掉 | 增加订阅直通的漂移：base URL 被删、token 或模型名被加回导致直通失效 |
@@ -333,7 +333,7 @@ settings.json 的 `env` 对所有 Claude Code 会话生效，启动器设置的�
 **6. 添加 Claude 账号时的风险提示**（`SUBS[0].riskNote`，app.js 6791，替换原文，不区分模式）
 
 - en: Anthropic may suspend or ban a Claude account it sees used outside its own apps. Other agents reach it through Claude Code, and Claude Code with subscription passthrough sends its requests as it always does, but Anthropic may still act on them; you use it at your own risk. Use an account you can afford to lose.
-- zh: Anthropic 发现 Claude 账号在它自己的应用之外使用时，可能会暂停或封禁该账号。其他 Agent 通过 Claude Code 使用它；订阅直通下的 Claude Code 照常发送自己的请求。但 Anthropic 仍可能采取措施，风险由你自行承担。请使用一个即使丢失也能接受的账号。
+- zh: Anthropic 官方可能会封禁在其官方应用之外使用的 Claude 账号。其他 Agent 的请求经由 Claude Code 发出，订阅直通下的 Claude Code 照常发送自己的请求，但 Anthropic 仍可能对此采取措施，风险由你自行承担。请用一个丢了也不心疼的账号。（沿用原文句式）
 
 **7. 代理页 · 菜单栏面板里的 Claude Code 行**（app.js 315–381）
 

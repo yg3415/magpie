@@ -330,7 +330,7 @@ function renderAgents() {
         });
         v.append(mi);
       }
-      v.append(el("span", "vt", main ? (opt?.label || main.value || t("default")) : ""));
+      v.append(el("span", "vt", a.passthrough ? t("Subscription passthrough") : main ? (opt?.label || main.value || t("default")) : ""));
       sum.append(v);
       // how much effort as three bars, in a column of its own down the list:
       // none lit for the default, off, none or auto, or for an agent that has
@@ -400,6 +400,11 @@ function renderAgents() {
     // the CLI's version, and an update when one is out (#202); the panel's
     // name column has no room for it
     if (mode !== "panel") who.append(cliTag(a));
+    if (a.passthrough && mode !== "panel") {
+      const tag = el("span", "ag-mode", t("Subscription passthrough"));
+      tag.title = t(PASSTHROUGH_TIP, { agent: a.name });
+      who.append(tag);
+    }
     // which of magpie's models its lists show, on a line under the name
     if (mode !== "panel" && a.models) {
       const line = el("div", "ag-models-line");
@@ -728,7 +733,9 @@ function askDisconnect(a) {
   const head = el("div", "ehead");
   head.append(icon(a.icon), el("b", "", t("Disconnect {agent} from magpie?", { agent: a.name })));
   ed.append(head);
-  ed.append(el("p", "lib-confirm", t("magpie takes out everything it wrote into {agent}'s config — its endpoint, key, models and effort — and puts back the settings {agent} had before. magpie's providers and accounts stay as they are.", { agent: a.name })));
+  ed.append(el("p", "lib-confirm", a.passthrough
+    ? t("{agent}'s requests stop going through magpie, and the settings {agent} had before come back. magpie's providers and accounts stay as they are.", { agent: a.name })
+    : t("magpie takes out everything it wrote into {agent}'s config — its endpoint, key, models and effort — and puts back the settings {agent} had before. magpie's providers and accounts stay as they are.", { agent: a.name })));
   const bar = el("div", "bar");
   const go = el("button", "text primary danger-fill", t("Disconnect"));
   go.onclick = async (e) => {
@@ -1393,6 +1400,10 @@ function openAgentMenu(anchor, a, inFold) {
         // for a config rewritten in a way magpie can't see: set it again anyway
         ...(reapply ? [{ name: "Apply again", icon: REAPPLY, sep: true, run: () => reapplyAgent(a) }] : []),
         ...(a.drift?.kind === "replaced" ? [{ name: "Keep current settings", icon: CHECK, run: () => keepAgent(a) }] : []),
+        // Claude Code on its own subscription, its requests through magpie as they are
+        ...(a.canPassthrough ? [{ name: a.passthrough ? "Stop subscription passthrough" : "Use subscription passthrough", icon: PASSTHROUGH_GLYPH, sep: !reapply,
+          tip: t(a.passthrough ? PASSTHROUGH_OFF_TIP : PASSTHROUGH_TIP, { agent: a.name }),
+          run: () => a.passthrough ? askLeavePassthrough(a, () => setPassthrough(a, false)) : askPassthrough(a) }] : []),
         // everything magpie wrote comes out, what the user had goes back (Fate on Discord)
         ...(a.wired ? [{ name: "Disconnect from magpie", icon: UNPLUG, sep: !reapply, tip: t(DISCONNECT_TIP, { agent: a.name }), run: () => askDisconnect(a) }] : []),
         { name: "Hide", icon: EYE_OFF, sep: true, run: () => setAgentHidden(a, true) },
@@ -1505,11 +1516,87 @@ function subEffortTitle(a, f, opt) {
 
 // launchButton copies the command that starts an agent on magpie, for one
 // that takes the gateway only from its environment (agy)
+// inUseNote names the menu bar's card of a provider's account in use:
+// Claude Code on subscription passthrough runs as an account picked each
+// time it starts, so the card is the account it is signed in to
+const inUseNote = (pid) => pid === "claude" && claudePass() ? "Signed in" : "Account in use";
+// claudePass: Claude Code is on subscription passthrough, for what the
+// Claude provider's editor says of its accounts
+const claudePass = () => (state?.agents || []).some((a) => a.id === "claude" && a.passthrough);
+// Subscription passthrough: Claude Code keeps its own Claude sign-in and
+// Anthropic's models, and its requests go through magpie as they are.
+const PASSTHROUGH_GLYPH = "M2 8h9M8 4.5 11.5 8 8 11.5M13.5 3v10";
+const PASSTHROUGH_TIP = "{agent} keeps its own Claude sign-in and Anthropic's models; its requests go through magpie as they are and show in Usage";
+const PASSTHROUGH_OFF_TIP = "{agent}'s requests stop going through magpie; the settings it had before come back";
+function askPassthrough(a) {
+  const ed = el("div", "editor disconnect-ask");
+  const head = el("div", "ehead");
+  head.append(icon(a.icon), el("b", "", t("Use subscription passthrough for {agent}?", { agent: a.name })));
+  ed.append(head);
+  const onMagpie = a.fields.some((f) => optionFor(f, f.value)?.ref);
+  ed.append(el("p", "lib-confirm", t("{agent} keeps its own Claude sign-in and uses Anthropic's own models. Its requests go through magpie unchanged, so they show in Usage and Routing; masking doesn't apply to them.", { agent: a.name })));
+  ed.append(el("p", "lib-confirm", t("Open {agent} through magpie's launcher and magpie picks the Claude account for each session, as Routing says. Sessions already open keep their connection until restarted.", { agent: a.name })));
+  if (onMagpie) ed.append(el("p", "lib-confirm", t("{agent} is on magpie's models now; it goes back to Anthropic's.", { agent: a.name })));
+  const bar = el("div", "bar");
+  const go = el("button", "text primary", t("Use subscription passthrough"));
+  go.onclick = async (e) => {
+    e.stopPropagation();
+    go.disabled = true;
+    go.classList.add("busy");
+    const ok = await setPassthrough(a, true);
+    if (ok) closeConfirmAsk();
+    else { go.disabled = false; go.classList.remove("busy"); }
+  };
+  const cancel = el("button", "text", t("Cancel"));
+  cancel.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+  bar.append(el("span", "grow"), cancel, go);
+  ed.append(bar);
+  confirmAsk = ed;
+  openModal(ed);
+  $("#modal").classList.add("lib");
+  cancel.focus({ preventScroll: true });
+}
+// askLeavePassthrough asks before something takes Claude Code off
+// subscription passthrough, then does it
+function askLeavePassthrough(a, then, why) {
+  const ed = el("div", "editor disconnect-ask");
+  const head = el("div", "ehead");
+  head.append(icon(a.icon), el("b", "", t("Stop subscription passthrough for {agent}?", { agent: a.name })));
+  ed.append(head);
+  ed.append(el("p", "lib-confirm", why || t("{agent}'s requests stop going through magpie, and the settings it had before come back.", { agent: a.name })));
+  const bar = el("div", "bar");
+  const go = el("button", "text primary", t("Continue"));
+  go.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); then(); };
+  const cancel = el("button", "text", t("Cancel"));
+  cancel.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+  bar.append(el("span", "grow"), cancel, go);
+  ed.append(bar);
+  confirmAsk = ed;
+  openModal(ed);
+  $("#modal").classList.add("lib");
+  cancel.focus({ preventScroll: true });
+}
+async function setPassthrough(a, on) {
+  try {
+    state = await api(`agents/passthrough-${on ? "on" : "off"}/` + a.id, {});
+    renderAgents();
+    const msg = on ? t("{agent} uses subscription passthrough: open it through magpie's launcher", { agent: a.name })
+      : t("{agent} no longer goes through magpie; its own settings are back", { agent: a.name });
+    if (state.notice) status(`${msg}. ${t(state.notice)}`, "warn", 9000);
+    else status(msg, "ok", on ? 8000 : undefined);
+    return true;
+  } catch (err) {
+    status(err.message, "err");
+    return false;
+  }
+}
+
 function launchButton(a) {
   const b = el("button", "field extra launch");
   b.type = "button";
   b.append(svg(LAUNCH_GLYPH, 13, 1.5));
-  b.title = t("{name} takes magpie only from its environment · click to copy the command that starts it:", { name: a.name }) + "\n" + a.launch;
+  b.title = (a.passthrough ? t("Open {name} through magpie's launcher, which picks the Claude account · click to copy the command:", { name: a.name })
+    : t("{name} takes magpie only from its environment · click to copy the command that starts it:", { name: a.name })) + "\n" + a.launch;
   b.setAttribute("aria-label", b.title);
   b.onclick = (ev) => {
     ev.stopPropagation();
@@ -2611,8 +2698,9 @@ function move(d) {
 
 async function commit(value) {
   if (!pick || value == null) return;
-  const { agent, field, anchor } = pick;
+  const { agent, field, anchor, leaving } = pick;
   const opt = pick.options.find((o) => o.value === value);
+  const asked = pick;
   closePicker();
   if (opt?.run) return opt.run(); // an act rather than a value (Disconnect from magpie)
   if (field.onPick) return field.onPick(value, opt); // a picker opened for something other than an agent's setting
@@ -2623,6 +2711,14 @@ async function commit(value) {
     return;
   }
   if (value === field.value) return;
+  // Claude Code's default, or one of magpie's models, takes it off
+  // subscription passthrough: asked first
+  if (agent.passthrough && field.key === "model" && (value === "" || opt?.ref) && !leaving) {
+    const again = { ...asked, leaving: true };
+    return askLeavePassthrough(agent, () => { pick = again; commit(value); },
+      value === "" ? t("{agent}'s default takes magpie out of its config: its requests stop going through magpie.", { agent: agent.name })
+        : t("{agent} moves onto magpie's models: its requests go through magpie's routing, no longer as they are.", { agent: agent.name }));
+  }
   // The pick shows at once: the row is drawn with it before magpie has
   // written the config and answered with the whole state, which can take
   // seconds (every agent's lists are read again for it). The answer then
@@ -2937,6 +3033,14 @@ function renderProviders() {
     who.append(name, el("div", "sub", (p.account ? t(lapsed ? "{user} is signed out" : "signed in as {user}", { user: p.account.user }) : p.host) + " · " + models));
     const using = p.agents.filter((a) => a.current);
     const uses = el("div", "uses");
+    // Claude Code on subscription passthrough runs on these accounts too
+    const cc = p.account?.agent === "claude" && (state.agents || []).find((a) => a.id === "claude" && a.passthrough);
+    if (cc && !using.some((a) => a.id === "claude")) {
+      const b = el("span", "use");
+      b.title = t("Claude Code · Subscription passthrough");
+      b.append(icon(cc.icon));
+      uses.append(b);
+    }
     for (const a of using) {
       const b = el("button", "use");
       b.title = a.group ? t("{name} · {model}, through the routing group {group} — click to change", { name: a.name, model: a.model, group: a.group })
@@ -4188,7 +4292,11 @@ function renderActivity() {
     r.append(el("span", "when", new Date(c.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })));
     r.append(el("span", "a", c.agent || "—"));
     r.append(el("span", "m", c.model));
-    r.append(el("span", "p", c.from === c.to ? c.from : `${c.from} → ${c.to}`));
+    if (c.passthrough) {
+      const pt = el("span", "p", t("passthrough"));
+      pt.title = t("Claude Code's own request on its own Claude subscription, passed to Anthropic unchanged and not masked");
+      r.append(pt);
+    } else r.append(el("span", "p", c.from === c.to ? c.from : `${c.from} → ${c.to}`));
     r.append(el("span", "grow"));
     r.append(el("span", "st", c.error ? `${c.status} ${c.error}` : `${c.status} · ${ledTook(c.ms)}` + (c.ttft ? " · " + t("TTFT {ms}", { ms: ledTook(c.ttft) }) : "")));
     r.title = open ? t("Hide request and response bodies") : t("Show request and response bodies");
@@ -5231,7 +5339,8 @@ function drawEditor(p, presetID) {
     // the sign-in belongs to the agent; magpie only borrows it
     const a = p.account;
     if (subOf(a.agent)) {
-      ed.append(...field(t("Accounts"), renderAccounts(a, p), p.routing ? t("Tick every account to use; Routing says how requests spread over them.") : subOf(a.agent).single ? t("{agent} keeps one account; the gateway runs it for every request. Signing in to another replaces it.", { agent: a.agentName }) : subOf(a.agent).own && (a.logins || []).some((l) => l.own) ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota. {agent} itself stays signed in as it is.", { agent: a.agentName && a.agentName !== a.agent ? a.agentName : p.name }) : subOf(a.agent).own || subOf(a.agent).plugin ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota.") : t("{agent} signs in to the first. Tick more and the gateway moves on to the next when the one before it is out of quota. Sessions already running keep theirs until restarted.", { agent: a.agentName })));
+      ed.append(...field(t("Accounts"), renderAccounts(a, p), a.agent === "claude" && claudePass() ? t("Tick every account to use. Claude Code started through magpie's launcher gets one of them each time it starts, as Routing says, and keeps it until it exits. Claude Code started any other way uses the account it is signed in to.")
+        : p.routing ? t("Tick every account to use; Routing says how requests spread over them.") : subOf(a.agent).single ? t("{agent} keeps one account; the gateway runs it for every request. Signing in to another replaces it.", { agent: a.agentName }) : subOf(a.agent).own && (a.logins || []).some((l) => l.own) ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota. {agent} itself stays signed in as it is.", { agent: a.agentName && a.agentName !== a.agent ? a.agentName : p.name }) : subOf(a.agent).own || subOf(a.agent).plugin ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota.") : t("{agent} signs in to the first. Tick more and the gateway moves on to the next when the one before it is out of quota. Sessions already running keep theirs until restarted.", { agent: a.agentName })));
       if ((a.logins || []).filter((l) => l.active || l.on).length > 1) ed.append(...renderRouting(p));
       if (p.move) ed.append(...renderMove(p));
     } else {
@@ -6668,6 +6777,13 @@ function renderRouting(p) {
   const a = p.account;
   // — at 98%, In order once used up (#530), never when kept on the first (#524)
   const own = (routing) => !a || (a.agent !== "codex" && a.agent !== "claude") ? ""
+    : a.agent === "claude" && claudePass() ? " " + (keptLogin(p)
+      ? t("Routing picks the account each time Claude Code starts through magpie's launcher, in the accounts' order; Claude Code started any other way stays signed in to {user}, whatever it has left.", { user: keptLogin(p) })
+      : p.keepLogin
+      ? t("Routing picks the account each time Claude Code starts through magpie's launcher; Claude Code started any other way stays signed in to the first account, whatever it has left.")
+      : routing === "order"
+        ? t("Routing picks the account each time Claude Code starts through magpie's launcher; Claude Code started any other way uses the one it is signed in to, which magpie moves to the next ticked account with room once it is used up, and back to the first once that has room again.")
+        : t("Routing picks the account each time Claude Code starts through magpie's launcher; Claude Code started any other way uses the one it is signed in to, which magpie moves to the next ticked account with room once it is 98% used, and back to the first once that has room again."))
     : " " + (keptLogin(p)
       ? t("Routing picks the account for each request through magpie, in the accounts' order; {agent} on its own stays signed in to {user}, whatever it has left.", { agent: a.agentName, user: keptLogin(p) })
       : p.keepLogin
@@ -6768,7 +6884,8 @@ function renderFallback(p) {
   return box;
 }
 function fallbackHint(p) {
-  return t("When {name} is out of quota, rate limited or down, a request goes to these instead, top first. It only happens before any of the reply is sent, and {name} then sits out a minute.", { name: p.name });
+  const base = t("When {name} is out of quota, rate limited or down, a request goes to these instead, top first. It only happens before any of the reply is sent, and {name} then sits out a minute.", { name: p.name });
+  return p.account?.agent === "claude" && claudePass() ? base + " " + t("Claude Code's own requests don't move to these: with subscription passthrough they always go to Anthropic.") : base;
 }
 
 // ---------- subscriptions ----------
@@ -6788,7 +6905,7 @@ const SUBS = [
   // both can also come from CLIProxyAPI's auth files or the agent's own (importing below)
   // Anthropic has banned accounts it saw used from other tools: said before one is added
   { agent: "claude", name: "Claude", icon: "claude-color", plans: "Pro · Max · Team", importable: true, risk: true,
-    riskNote: "Anthropic may suspend or ban a Claude account it sees used outside its own apps. magpie sends requests through Claude Code, but Anthropic may still act on them; you use it at your own risk. Use an account you can afford to lose." },
+    riskNote: "Anthropic may suspend or ban a Claude account it sees used outside its own apps. Other agents reach it through Claude Code, and Claude Code with subscription passthrough sends its requests as it always does, but Anthropic may still act on them; you use it at your own risk. Use an account you can afford to lose." },
   { agent: "codex", name: "ChatGPT", icon: "openai", plans: "Plus · Pro · Business", importable: true },
   // cursor-agent keeps one account; signing in again replaces it
   { agent: "cursor", name: "Cursor", icon: "cursor", plans: "Pro · Ultra · Teams", single: true },
@@ -7557,7 +7674,9 @@ function renderAccounts(a, p) {
   if ((a.agent === "codex" || a.agent === "claude") && several && p) {
     const box = el("div", "keep-login");
     const [keep, cb] = tick(t("Keep {agent} signed in to", { agent: a.agentName }), !!p.keepLogin);
-    keep.title = t("magpie won't sign {agent} in to another account when the first runs low; requests through magpie still go to the other ticked accounts as Routing says", { agent: a.agentName });
+    keep.title = a.agent === "claude" && claudePass()
+      ? t("magpie won't sign Claude Code in to another account when the first runs low. This only matters for Claude Code started any other way than through magpie's launcher.")
+      : t("magpie won't sign {agent} in to another account when the first runs low; requests through magpie still go to the other ticked accounts as Routing says", { agent: a.agentName });
     // the app's own menu, as every other pick in it, not a native select
     let keepAs = kept;
     const opts = [{ v: "", name: t("the first account"), note: "", literalName: true }];
@@ -9951,6 +10070,7 @@ function ledDetail(r, cols) {
   }
   if (r.computerName) add("Computer", r.computerName);
   add("Request ID", r.rid);
+  if (r.passthrough) add("Mode", t("Subscription passthrough · sent to Anthropic unchanged, not masked"));
   add("Endpoint", r.ep);
   add("Session ID", r.session);
   if (r.ttft_ms) add("First token", ledTook(r.ttft_ms));
@@ -10556,6 +10676,12 @@ function renderLedger() {
     if (access) {
       const badge = el("span", "src access access-" + r.access, t(access));
       badge.title = t(access);
+      badges.append(badge);
+    }
+    // Claude Code's own request, passed to Anthropic as it came
+    if (!local && r.passthrough) {
+      const badge = el("span", "src access access-passthrough", t("Passthrough"));
+      badge.title = t("Claude Code's own request on its own Claude subscription, passed to Anthropic unchanged");
       badges.append(badge);
     }
     if (local && r.session_account) {
@@ -12714,12 +12840,12 @@ function renderTrayUsage(s, keep) {
       // a subscription with several accounts: the one in use, whichever
       // it is now, before each by name
       if (q.user && !opts.some((o) => o.v === q.provider + IN_USE) && cards.filter((c) => c.provider === q.provider).length > 1)
-        opts.push({ v: q.provider + IN_USE, name: q.name, note: "Account in use" });
+        opts.push({ v: q.provider + IN_USE, name: q.name, note: inUseNote(q.provider) });
       opts.push({ v: trayCardID(q), name: q.name, note: [q.plan, q.user].filter(Boolean).join(" · ") });
     }
     // one ticked that isn't there now (signed out, or not answering) stays
     // to be unticked
-    for (const id of ids) if (!opts.some((o) => o.v === id)) opts.push({ v: id, name: id.split("|")[0], note: id.endsWith(IN_USE) ? "Account in use" : id.split("|")[1] || "" });
+    for (const id of ids) if (!opts.some((o) => o.v === id)) opts.push({ v: id, name: id.split("|")[0], note: id.endsWith(IN_USE) ? inUseNote(id.split("|")[0]) : id.split("|")[1] || "" });
     if (!cards.length) opts.push({ v: "\x00", name: "No subscriptions yet", note: "Sign in to one, or add a plan's key, and it shows on the Usage page" });
     openProtoMenu(pill, opts, ids, (trayUsages) => savePrefs({ ...keep, trayUsages }), "Shown beside the icon");
   };
@@ -13104,7 +13230,9 @@ function renderRedact(s, keep) {
     box.append(r);
   };
   const onOff = (on, fn) => segs([["off", t("Off")], ["on", t("On")]], on ? "on" : "off", (v) => fn(v === "on"));
-  row(t("Mask secrets"), t("API keys, private keys, tokens and passwords go to vendors as placeholders, and come back as they were"),
+  // Claude Code on subscription passthrough sends Anthropic what it wrote
+  const pass = (state.agents || []).some((a) => a.passthrough) ? " " + t("Not for Claude Code on subscription passthrough: its requests go to Anthropic unchanged.") : "";
+  row(t("Mask secrets"), t("API keys, private keys, tokens and passwords go to vendors as placeholders, and come back as they were") + pass,
     onOff(s.redact, (redact) => savePrefs({ ...keep, redact })));
   row(t("Mask personal data"), t("Emails, phone numbers, ID and bank card numbers too"),
     onOff(s.redactPersonal, (redactPersonal) => savePrefs({ ...keep, redactPersonal })));

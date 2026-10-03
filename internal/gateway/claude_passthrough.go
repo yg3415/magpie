@@ -151,9 +151,14 @@ func (s *Server) passClaude(w http.ResponseWriter, r *http.Request) {
 	if hasC {
 		id = c.rest
 	}
+	// the account it runs as is the one there is, named as routing names it
+	var order []Weighed
+	if hasC {
+		order = []Weighed{weighed(c, p, weighing{}, false, provider.Anthropic)}
+	}
 	tr := s.trace.begin(Route{Passthrough: true, Pinned: user, Time: start, Agent: call.Agent, Session: sessionOf(r.Header),
 		ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, Model: model,
-		Effort: requestEffort(provider.Anthropic, body), Provider: p.ID})
+		Effort: requestEffort(provider.Anthropic, body), Provider: p.ID, Order: order})
 	if telemetry != nil {
 		telemetry.routeID = tr.ID
 	}
