@@ -10,6 +10,7 @@ package gateway
 // can't take one over mid-run.
 
 import (
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -55,6 +56,13 @@ func (s *Server) claudeLaunch(w http.ResponseWriter, r *http.Request) {
 		s.trace.update(tr, func(t *Route) { t.Done, t.Status, t.Error = true, http.StatusBadGateway, msg })
 		writeError(w, provider.Anthropic, http.StatusBadGateway, msg)
 		return
+	}
+	if dir != "" {
+		// Claude Code there is the user's but for the account: a part
+		// that couldn't be shared is said, and the launch goes on
+		if err := shareClaudeConfig(dir); err != nil {
+			log.Printf("claude launch: %s's config directory shares only part of the user's: %v", c.p.Account.User, err)
+		}
 	}
 	s.trace.update(tr, func(t *Route) {
 		t.Pinned = c.p.Account.User
