@@ -134,6 +134,15 @@ type Agent struct {
 	// has no fields magpie sets. Added says whether it has magpie already.
 	Import func() string
 	Added  func() bool
+	// Passthrough, for Claude Code, says it is wired to send its own
+	// requests, signed with its own Claude subscription, through the
+	// gateway, which passes them to Anthropic as they are (subscription
+	// passthrough); SetPassthrough wires it so or takes that back out, and
+	// PassthroughSet says magpie wired it so, for Drift, Reapply and
+	// Disconnect to know it whatever the config says now.
+	Passthrough    func() bool
+	SetPassthrough func(on bool) error
+	PassthroughSet func() bool
 	// Launch, for an agent that takes the gateway only from its
 	// environment (agy), is the command that starts it on magpie, while
 	// it is on one of magpie's models; "" otherwise.

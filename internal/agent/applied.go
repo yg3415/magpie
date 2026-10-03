@@ -142,6 +142,9 @@ func (a *Agent) Drift() *Drift {
 		return &Drift{Kind: "replaced", Field: f.Key, Now: vals[f.Key], Want: want,
 			Detail: a.Name + "'s config was changed outside magpie: " + f.Label + " is " + orDefault(vals[f.Key]) + ", not " + want + " as magpie set it"}
 	}
+	// Claude Code on its own subscription through the gateway is on
+	// magpie as much as one on magpie's models
+	onMagpie = onMagpie || a.passthrough()
 	if a.Reached != nil && onMagpie {
 		if at, to, refused := a.Reached(rec.At); !at.IsZero() {
 			switch {
@@ -232,6 +235,9 @@ func orDefault(v string) string {
 // Either way the record is renewed, so a use before now no longer counts.
 func (a *Agent) Reapply() error {
 	d := a.Drift()
+	if d != nil && d.Kind == "unwired" && a.passthroughSet() {
+		return a.SetPassthrough(true)
+	}
 	if d != nil && d.Kind == "replaced" {
 		rec := appliedOf(a.ID)
 		// the model first: the others (an effort) are checked against it
@@ -275,6 +281,9 @@ func (a *Agent) Keep() {
 // magpie's models, or on magpie itself (an app whose one setting is magpie
 // as its provider).
 func (a *Agent) Wired() bool {
+	if a.passthrough() {
+		return true
+	}
 	vals := a.Values()
 	for _, f := range a.Fields {
 		if v := vals[f.Key]; v == magpieID || magpieValue(a, f, v, vals) {
@@ -292,7 +301,7 @@ func (a *Agent) Wired() bool {
 // each one magpie set that reads as magpie set it (an effort). What magpie
 // remembered setting is forgotten.
 func (a *Agent) Disconnect() error {
-	if !a.Wired() {
+	if !a.Wired() && !a.passthroughSet() {
 		return nil
 	}
 	before, rec := a.Values(), appliedOf(a.ID)
@@ -382,4 +391,25 @@ func wiringOff(name, file string, get func(string) (string, bool), kvs ...string
 		}
 	}
 	return ""
+}
+
+// passthrough says the agent sends its own requests through the gateway
+// on its own subscription (Agent.Passthrough).
+func (a *Agent) passthrough() bool { return a.Passthrough != nil && a.Passthrough() }
+
+// passthroughSet says magpie wired the agent for subscription passthrough.
+func (a *Agent) passthroughSet() bool { return a.PassthroughSet != nil && a.PassthroughSet() }
+
+// UsePassthrough wires the agent for subscription passthrough, or takes it
+// back out, and takes its config as it then is: magpie's models, which
+// passthrough has none of, are no longer said to have been changed.
+func (a *Agent) UsePassthrough(on bool) error {
+	if a.SetPassthrough == nil {
+		return fmt.Errorf("%s has no subscription passthrough", a.Name)
+	}
+	if err := a.SetPassthrough(on); err != nil {
+		return err
+	}
+	a.Keep()
+	return nil
 }

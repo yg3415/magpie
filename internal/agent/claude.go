@@ -276,7 +276,15 @@ func claudeIn(at place) *Agent {
 	path := filepath.Join(at.home, ".claude", "settings.json")
 	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
 	model := jsonGet(path, "model")
-	routed := func() bool { return env("ANTHROPIC_BASE_URL") == at.gw() }
+	// routed: on magpie's models, by magpie's token; passthrough: through
+	// the gateway on its own Claude subscription, with no token of
+	// magpie's or anyone's, as Claude Code is signed in (claude_passthrough
+	// in the gateway)
+	routed := func() bool { return env("ANTHROPIC_BASE_URL") == at.gw() && env("ANTHROPIC_AUTH_TOKEN") != "" }
+	passthrough := func() bool {
+		return env("ANTHROPIC_BASE_URL") == at.gw() && env("ANTHROPIC_AUTH_TOKEN") == "" && env("ANTHROPIC_API_KEY") == ""
+	}
+	passthroughKey := at.key("claude.passthrough")
 
 	// the value shown: the catalog ref while routed, else Claude's own model.
 	get := func() string {
@@ -381,13 +389,14 @@ func claudeIn(at place) *Agent {
 		if err := dropCaps(); err != nil {
 			return "", err
 		}
-		if !routed() {
+		if !routed() && !passthrough() {
 			return "", nil
 		}
 		keys := make([]string, len(claudeEnv))
 		for i, k := range claudeEnv {
 			keys[i] = "env." + k
 		}
+		forget(passthroughKey)
 		if err := edit.DelJSON(path, keys...); err != nil {
 			return "", err
 		}
@@ -398,6 +407,9 @@ func claudeIn(at place) *Agent {
 		}
 		if t := unstash(at.key("claude.auth_token")); t != "" {
 			back = append(back, edit.KV{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: t})
+		}
+		if k := unstash(at.key("claude.api_key")); k != "" {
+			back = append(back, edit.KV{Path: "env.ANTHROPIC_API_KEY", Value: k})
 		}
 		if len(back) > 0 {
 			if err := edit.SetJSON(path, back...); err != nil {
@@ -414,7 +426,7 @@ func claudeIn(at place) *Agent {
 			for _, k := range claudeEnv {
 				keys = append(keys, "env."+k)
 			}
-			forget(at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"))
+			forget(at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"), at.key("claude.api_key"), passthroughKey)
 			if err := dropWindow(); err != nil {
 				return err
 			}
@@ -424,7 +436,9 @@ func claudeIn(at place) *Agent {
 			return edit.DelJSON(path, keys...)
 		}
 		if isMagpie(v) {
-			if !routed() {
+			// from passthrough, the stash already has what was there before
+			forget(passthroughKey)
+			if !routed() && !passthrough() {
 				stash(map[string]string{
 					at.key("claude.model"):      model(),
 					at.key("claude.base_url"):   env("ANTHROPIC_BASE_URL"),
@@ -456,10 +470,15 @@ func claudeIn(at place) *Agent {
 		// a word that is no model: an effort level the model doesn't take,
 		// ultracode (magpie claude ultra), a typo. Another endpoint's
 		// names are its own.
-		if u := env("ANTHROPIC_BASE_URL"); u == "" || routed() {
+		if u := env("ANTHROPIC_BASE_URL"); u == "" || routed() || passthrough() {
 			if err := claudeModelWord(v, get()); err != nil {
 				return err
 			}
+		}
+		// one of Anthropic's models through passthrough stays there: it is
+		// Claude Code's own pick, on its own subscription
+		if passthrough() {
+			return edit.SetJSON(path, edit.KV{Path: "model", Value: v})
 		}
 		if _, err := unroute(); err != nil {
 			return err
@@ -530,9 +549,12 @@ func claudeIn(at place) *Agent {
 		Set: set,
 		Options: func(cur map[string]string) []Option {
 			name, direct := "Claude Code", "Anthropic"
-			if u := env("ANTHROPIC_BASE_URL"); u != "" && !routed() {
+			if u := env("ANTHROPIC_BASE_URL"); u != "" && !routed() && !passthrough() {
 				name += " · " + hostOf(u)
 				direct = hostOf(u)
+			}
+			if passthrough() {
+				direct = "" // through magpie, as they are
 			}
 			// an alias names the model the user's own env gives its tier,
 			// as Claude Code reads it; magpie's, while routed, isn't theirs
@@ -784,6 +806,84 @@ func claudeIn(at place) *Agent {
 	}
 	fields = append(fields, effortField("subagent_effort", "subagent effort", "its subagents", subagentAt, setSubagent))
 
+	// unwire takes magpie out of Claude Code's config and puts back the
+	// endpoint, token and model the user had before it
+	unwire := func() error {
+		was, err := unroute()
+		if err != nil {
+			return err
+		}
+		forget(at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"), at.key("claude.api_key"), passthroughKey)
+		// the model left alone where magpie had none to take over
+		switch {
+		case was != "" && !isMagpie(was):
+			return edit.SetJSON(path, edit.KV{Path: "model", Value: was})
+		case isMagpie(get()):
+			return edit.DelJSON(path, "model")
+		}
+		return nil
+	}
+	// setPassthrough wires Claude Code to send its own requests through the
+	// gateway on its own Claude subscription: the gateway its endpoint, no
+	// token, Anthropic's own models. Off puts back what it had before
+	// magpie, as Unwire does.
+	setPassthrough := func(on bool) error {
+		if !on {
+			if !passthrough() && stashLoad()[passthroughKey] == "" {
+				return nil
+			}
+			stale = "connection"
+			return unwire()
+		}
+		if !passthrough() {
+			if !routed() {
+				stash(map[string]string{
+					at.key("claude.model"):      model(),
+					at.key("claude.base_url"):   env("ANTHROPIC_BASE_URL"),
+					at.key("claude.auth_token"): env("ANTHROPIC_AUTH_TOKEN"),
+					at.key("claude.api_key"):    env("ANTHROPIC_API_KEY"),
+				})
+			}
+			if err := dropWindow(); err != nil {
+				return err
+			}
+			if err := dropCaps(); err != nil {
+				return err
+			}
+			keys := []string{"env.ANTHROPIC_API_KEY"}
+			for _, k := range claudeEnv {
+				if k != "ANTHROPIC_BASE_URL" {
+					keys = append(keys, "env."+k)
+				}
+			}
+			// a model of magpie's means nothing to Anthropic
+			if isMagpie(model()) {
+				keys = append(keys, "model")
+			}
+			if err := edit.DelJSON(path, keys...); err != nil {
+				return err
+			}
+			if err := edit.SetJSON(path, edit.KV{Path: "env.ANTHROPIC_BASE_URL", Value: at.gw()}); err != nil {
+				return err
+			}
+			stale = "connection"
+		}
+		stash(map[string]string{passthroughKey: "1"})
+		return nil
+	}
+	// managedOff is what an administrator's settings set that wins over
+	// magpie's endpoint, "" when nothing
+	managedOff := func() string {
+		managed := claudeManaged()
+		if at.sys != nil {
+			managed = at.sys("/etc/claude-code/managed-settings.json")
+		}
+		if u, _ := edit.GetJSON(managed, "env.ANTHROPIC_BASE_URL"); u != "" && u != at.gw() {
+			return "Claude Code's managed settings (" + at.native(managed) + ") set ANTHROPIC_BASE_URL to " + u + ", which wins over magpie's"
+		}
+		return ""
+	}
+
 	return &Agent{
 		ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Aliases: []string{"cc", "claude-code"},
 		UA:  []string{"claude-cli", "claude-code"},
@@ -792,21 +892,10 @@ func claudeIn(at place) *Agent {
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had
-		Unwire: func() error {
-			was, err := unroute()
-			if err != nil {
-				return err
-			}
-			forget(at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"))
-			// the model left alone where magpie had none to take over
-			switch {
-			case was != "" && !isMagpie(was):
-				return edit.SetJSON(path, edit.KV{Path: "model", Value: was})
-			case isMagpie(get()):
-				return edit.DelJSON(path, "model")
-			}
-			return nil
-		},
+		Unwire:         unwire,
+		Passthrough:    passthrough,
+		SetPassthrough: setPassthrough,
+		PassthroughSet: func() bool { return stashLoad()[passthroughKey] != "" },
 		// the catalog's models, with their levels, as Claude Code is told
 		// them, while magpie's are the ones it has
 		Sync: func() error {
@@ -820,16 +909,26 @@ func claudeIn(at place) *Agent {
 			return writeCaps(models...)
 		},
 		Check: func() string {
+			// set to pass its own requests through: still so, by its
+			// settings and nothing over them
+			if passthrough() || stashLoad()[passthroughKey] != "" {
+				if d := managedOff(); d != "" {
+					return d
+				}
+				switch {
+				case env("ANTHROPIC_BASE_URL") != at.gw():
+					return "Claude Code's settings (" + at.native(path) + ") no longer send it through magpie: ANTHROPIC_BASE_URL is " + orDefault(env("ANTHROPIC_BASE_URL")) + ", not " + at.gw()
+				case env("ANTHROPIC_AUTH_TOKEN") != "" || env("ANTHROPIC_API_KEY") != "":
+					return "Claude Code's settings (" + at.native(path) + ") give it a token, so it no longer signs in with its own subscription"
+				}
+				return ""
+			}
 			if !isMagpie(get()) {
 				return ""
 			}
 			// an administrator's settings win over the user's
-			managed := claudeManaged()
-			if at.sys != nil {
-				managed = at.sys("/etc/claude-code/managed-settings.json")
-			}
-			if u, _ := edit.GetJSON(managed, "env.ANTHROPIC_BASE_URL"); u != "" && u != at.gw() {
-				return "Claude Code's managed settings (" + at.native(managed) + ") set ANTHROPIC_BASE_URL to " + u + ", which wins over magpie's"
+			if d := managedOff(); d != "" {
+				return d
 			}
 			return wiringOff("Claude Code", path, func(k string) (string, bool) { return edit.GetJSON(path, "env."+k) },
 				"ANTHROPIC_BASE_URL", at.gw(), "ANTHROPIC_AUTH_TOKEN", gateway.Token)
