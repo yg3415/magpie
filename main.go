@@ -153,6 +153,10 @@ func run(args []string) error {
 	// a model Claude Code names that magpie doesn't serve goes to the one
 	// it is set to use for that tier
 	gateway.StandIn = agent.StandIn
+	// Claude Code on subscription passthrough starts through magpie's
+	// launcher, written when passthrough was turned on: this magpie's goes
+	// in its place, so an update reaches it
+	gateway.WhileServing = append(gateway.WhileServing, func(context.Context) { agent.RefreshLaunchers() })
 	// the setup kept the same on every computer, by whichever serves
 	gateway.WhileServing = append(gateway.WhileServing, davsync.Run)
 	// and dsh's patch lists, which dsh reads live: a route left behind by

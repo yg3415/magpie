@@ -204,3 +204,19 @@ func TestClaudePassthroughDrift(t *testing.T) {
 		})
 	}
 }
+
+// The launcher an older magpie wrote is replaced by this one's while
+// passthrough is on, as an update starts serving.
+func TestRefreshLaunchers(t *testing.T) {
+	home, _, _ := passthroughSettings(t, `{}`)
+	a := claude(home)
+	if err := a.UsePassthrough(true); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(scripts.LauncherDir(), "claude")
+	os.WriteFile(path, []byte("#!/bin/sh\n# an older launcher\n"), 0o755)
+	RefreshLaunchers()
+	if b, _ := os.ReadFile(path); !bytes.Equal(b, scripts.ClaudeLauncher) {
+		t.Fatalf("launcher not refreshed:\n%s", b)
+	}
+}

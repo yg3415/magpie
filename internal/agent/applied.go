@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -420,4 +421,18 @@ func (a *Agent) UsePassthrough(on bool) error {
 		}
 	}
 	return nil
+}
+
+// RefreshLaunchers writes this magpie's launcher for each agent on
+// subscription passthrough, as turning it on did, when the one there is
+// another magpie's (an older one).
+func RefreshLaunchers() {
+	for _, a := range Detected() {
+		if a.passthrough() {
+			if _, err := scripts.InstallClaudeLauncher(); err != nil {
+				log.Printf("%s: magpie's launcher couldn't be written: %v", a.Name, err)
+			}
+			return
+		}
+	}
 }
