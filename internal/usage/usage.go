@@ -89,6 +89,9 @@ type Record struct {
 	// Kind is what the agent made the call for when it isn't a turn of
 	// the conversation: a Codex subagent's (review, compact, guardian…)
 	Kind string `json:"kind,omitempty"`
+	// Passthrough: Claude Code's own request, forwarded to Anthropic as it
+	// came, on the subscription it is signed in to
+	Passthrough bool `json:"passthrough,omitempty"`
 	// Via is the computer whose magpie passed the call on to this one (a
 	// Remote magpie provider there), Agent being the agent's on it; "" when
 	// no other magpie forwarded it (including direct LAN/container clients).

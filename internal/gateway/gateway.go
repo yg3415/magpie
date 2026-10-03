@@ -249,6 +249,9 @@ type Call struct {
 	// Kind: what the agent made the call for, when it isn't its turn —
 	// a Codex subagent's (callKind) — "" for a turn
 	Kind string `json:"kind,omitempty"`
+	// Passthrough: Claude Code's own request, forwarded to Anthropic as it
+	// came (claude_passthrough.go)
+	Passthrough bool `json:"passthrough,omitempty"`
 	// For: the request a call of magpie's own (a web search) was made for
 	For      *CallFor          `json:"for,omitempty"`
 	Model    string            `json:"model"`
@@ -477,7 +480,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos and /v1beta/models/*")
 	})
-	return s.counted(callerGuard(withCaller(keyLimited(mux))))
+	return s.counted(callerGuard(withCaller(s.claudeDirect(keyLimited(mux)))))
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {

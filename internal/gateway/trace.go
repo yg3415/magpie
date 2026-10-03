@@ -43,6 +43,10 @@ type Route struct {
 	Nested   []NestedRule `json:"nested,omitempty"`
 	Affinity *Affinity    `json:"affinity,omitempty"` // its conversation, and whether it stayed put
 	Pinned   string       `json:"pinned,omitempty"`   // the account AccountHeader named: only it was tried
+	// Passthrough: Claude Code's own request, forwarded to Anthropic as it
+	// came on the account it is signed in to (Pinned), which was chosen
+	// when Claude Code started (claude_passthrough.go)
+	Passthrough bool `json:"passthrough,omitempty"`
 	Order    []Weighed    `json:"order"`              // who was to try it, first first
 	Left     []Weighed    `json:"left,omitempty"`
 	Tries    []Try        `json:"tries"`
