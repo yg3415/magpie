@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1078,12 +1079,20 @@ func (u cliUsage) gateway() Usage {
 	return Usage{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.OutputDetails.Thinking}
 }
 
+// billingHeader is the line Claude Code begins its system prompt with when
+// it is the caller (x-anthropic-billing-header: cc_version=2.1.288.5ea;
+// cc_entrypoint=sdk-cli;), its version's last part made from the user's
+// message: kept, it made the caller's instructions differ with every
+// message, and the mark on them (renderClaudePrompt) never found them in
+// the cache. The Claude Code the bridge runs sends its own.
+var billingHeader = regexp.MustCompile(`^\s*x-anthropic-billing-header:(\s*[A-Za-z_]+=[^;\n]*;)*[ \t]*\n?`)
+
 func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 	var blocks []map[string]any
 	var text strings.Builder
 	if req.System != "" || req.ToolChoice == "required" || strings.HasPrefix(req.ToolChoice, "name:") {
 		text.WriteString("<external_system_instructions>\n")
-		text.WriteString(req.System)
+		text.WriteString(billingHeader.ReplaceAllString(req.System, ""))
 		switch {
 		case req.ToolChoice == "required":
 			text.WriteString("\nYou must call at least one available tool before answering.")
