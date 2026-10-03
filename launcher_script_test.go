@@ -18,17 +18,24 @@ import (
 // record, the query the gateway was asked, the exit code and stderr.
 func runLauncher(t *testing.T, gateway string, args ...string) (record, stderr string, code int) {
 	t.Helper()
+	return runLauncherEnv(t, gateway, nil, args...)
+}
+
+// runLauncherEnv is runLauncher with env added to the shell's.
+func runLauncherEnv(t *testing.T, gateway string, env []string, args ...string) (record, stderr string, code int) {
+	t.Helper()
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "claude-real")
 	out := filepath.Join(dir, "ran")
 	os.WriteFile(fake, []byte(`#!/bin/sh
-{ echo "args=$*"; echo "base=${ANTHROPIC_BASE_URL:-}"; echo "token=${ANTHROPIC_AUTH_TOKEN:-}"; echo "key=${ANTHROPIC_API_KEY:-}"
+{ echo "args=$*"; echo "pin=${MAGPIE_CLAUDE_ACCOUNT:-}"; echo "base=${ANTHROPIC_BASE_URL:-}"; echo "token=${ANTHROPIC_AUTH_TOKEN:-}"; echo "key=${ANTHROPIC_API_KEY:-}"
   echo "config=${CLAUDE_CONFIG_DIR:-}"; echo "secure=${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}"; } > `+out+`
 `), 0o755)
 	cmd := exec.Command("sh", "scripts/claude-launcher.sh")
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Env = append(os.Environ(), "MAGPIE_GATEWAY="+gateway, "MAGPIE_CLAUDE="+fake,
 		"ANTHROPIC_AUTH_TOKEN=magpie", "ANTHROPIC_API_KEY=sk-x", "CLAUDE_CONFIG_DIR=/elsewhere", "CLAUDE_SECURESTORAGE_CONFIG_DIR=/slot")
+	cmd.Env = append(cmd.Env, env...)
 	var errb strings.Builder
 	cmd.Stderr = &errb
 	err := cmd.Run()
@@ -72,6 +79,12 @@ func TestClaudeLauncher(t *testing.T) {
 		if !strings.Contains(ran, want) {
 			t.Errorf("missing %q in\n%s", want, ran)
 		}
+	}
+
+	// an account pinned by name is asked for, and not passed on
+	ran, stderr, code = runLauncherEnv(t, gw.URL, []string{"MAGPIE_CLAUDE_ACCOUNT=b@example.com"})
+	if code != 0 || !strings.Contains(asked, "&account=b%40example.com") || strings.Contains(ran, "b@example.com") {
+		t.Fatalf("pinned: exit %d %s; asked %s; ran\n%s", code, stderr, asked, ran)
 	}
 
 	// the account Claude Code is signed in to: its own config directory

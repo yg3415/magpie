@@ -23,6 +23,7 @@ import (
 const ClaudeLaunchPath = "/v1/magpie/claude-launch"
 
 // claudeLaunch answers GET /v1/magpie/claude-launch?model=<m>&effort=<e>
+// (&account=<user> to run as that account, whatever routing would pick)
 // with the account Claude Code should run as and where its sign-in is:
 // {"account": user, "configDir": dir}, dir "" when it is the account
 // Claude Code itself is signed in to, else the config directory magpie
@@ -41,6 +42,18 @@ func (s *Server) claudeLaunch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	model, effort := strings.TrimSpace(q.Get("model")), strings.TrimSpace(q.Get("effort"))
 	cs, pl := claudeLaunchPlan(p, model, effort)
+	// an account asked for by name is the one, resting or not, when it is
+	// among those on for the model
+	pinned := strings.TrimSpace(q.Get("account"))
+	if pinned != "" {
+		i := slices.IndexFunc(cs, func(c candidate) bool { return strings.EqualFold(c.p.Account.User, pinned) })
+		if i < 0 {
+			msg := pinned + " isn't one of magpie's Claude accounts on for " + cmpOr(model, "Claude Code") + ": tick it on the Providers page"
+			writeError(w, provider.Anthropic, http.StatusConflict, msg)
+			return
+		}
+		cs = []candidate{cs[i]}
+	}
 	tr := s.trace.begin(Route{Kind: "claude-launch", Time: start, Agent: "claude", Model: model, Effort: effort, Provider: p.ID,
 		Order: pl.order, Left: pl.left})
 	if len(cs) == 0 {

@@ -108,3 +108,19 @@ func TestClaudeLaunchLocalOnly(t *testing.T) {
 		t.Fatalf("from another machine: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// An account asked for by name is the one Claude Code runs as, resting or
+// not; one not on for the model is refused.
+func TestClaudeLaunchPinned(t *testing.T) {
+	claudeAccountsAndAPI(t, answerStream)
+	s := New()
+	p, _ := claudeProvider()
+	c, _ := claudeCandidate(p, "b@example.com", "claude-sonnet-5-5")
+	s.restAfter(c, http.StatusTooManyRequests, http.Header{"Retry-After": {"3600"}}, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`))
+	if code, got := launch(t, s, "?model=claude-sonnet-5-5&account=B@example.com"); code != 200 || got["account"] != "b@example.com" || got["configDir"] == "" {
+		t.Fatalf("pinned b: %d %v", code, got)
+	}
+	if code, _ := launch(t, s, "?model=claude-sonnet-5-5&account=nobody@example.com"); code != http.StatusConflict {
+		t.Fatalf("pinned to no account: %d", code)
+	}
+}

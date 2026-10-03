@@ -14,6 +14,8 @@
 #   export PATH="$HOME/.local/share/magpie/bin:$PATH"
 #
 # MAGPIE_GATEWAY   the gateway (default http://127.0.0.1:3425)
+# MAGPIE_CLAUDE_ACCOUNT  run as this account (its email) instead of the one
+#                  routing picks; it must be ticked in magpie
 # MAGPIE_CLAUDE    the Claude Code to run (default: the newest installed)
 set -eu
 
@@ -65,7 +67,7 @@ for a in "$@"; do
 done
 
 enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
-if ! answer=$(curl -sS --max-time 15 -w '\n%{http_code}' "$gateway/v1/magpie/claude-launch?model=$(enc "$model")&effort=$(enc "$effort")" 2>&1); then
+if ! answer=$(curl -sS --max-time 15 -w '\n%{http_code}' "$gateway/v1/magpie/claude-launch?model=$(enc "$model")&effort=$(enc "$effort")$( [ -n "${MAGPIE_CLAUDE_ACCOUNT:-}" ] && printf '&account=%s' "$(enc "$MAGPIE_CLAUDE_ACCOUNT")")" 2>&1); then
   say "magpie isn't running at $gateway ($answer). Start magpie, or run Claude Code itself."
   exit 69
 fi
@@ -88,7 +90,7 @@ if [ -z "$account" ]; then
 fi
 
 # nothing from the shell may send Claude Code elsewhere or as another
-unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR CLAUDE_CONFIG_DIR
+unset MAGPIE_CLAUDE_ACCOUNT ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CLAUDE_SECURESTORAGE_CONFIG_DIR CLAUDE_CONFIG_DIR
 export ANTHROPIC_BASE_URL="$gateway"
 if [ -n "$dir" ]; then
   export CLAUDE_CONFIG_DIR="$dir"
