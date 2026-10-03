@@ -168,7 +168,14 @@ func TestClaudePassthroughVerbatim(t *testing.T) {
 	}
 	// what the reply's headers said b has left is what routing weighs it
 	// by: the week, 10% used, decides
-	if used, _ := provider.Allowances("claude")["b@example.com"].For("claude-sonnet-5-5", time.Now()); used != 10 {
+	// (read again behind the first ask after it changed, as any is)
+	var used float64
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if used, _ = provider.Allowances("claude")["b@example.com"].For("claude-sonnet-5-5", time.Now()); used == 10 {
+			break
+		}
+	}
+	if used != 10 {
 		t.Fatalf("b's allowance used: %v", used)
 	}
 }
