@@ -51,7 +51,7 @@ magpie 现在处理 Claude 订阅请求的方式是在本机启动一个真实�
 
 - 转发是 Claude Code 的一种新接入模式（暂名「订阅直通」），和现有的模型接入互斥：Claude Code 要么接入 magpie 用 magpie 的模型，要么用订阅直通，不能同时。不再设单独的全局开关。
 - 切到订阅直通时，magpie 改写 `~/.claude/settings.json` 的 `env`（Claude Code 以 settings.json 为准，见第 2 节）：
-  - 写入 `ANTHROPIC_BASE_URL` 指向 magpie 网关；这样不经过启动器 启动的 Claude Code（IDE 插件、按绝对路径启动等）也走转发，流量都能统计；
+  - 写入 `ANTHROPIC_BASE_URL` 指向 magpie 网关；这样不经过启动器启动的 Claude Code（IDE 插件、按绝对路径启动等）也走转发，流量都能统计；
   - 去掉 magpie 模型接入写的 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_*_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`、`CLAUDE_CODE_MODEL_CAPABILITIES` 等，以及 `model`；
   - 用户自己原本的设置照旧，由现有的接入 / 断开逻辑记住并在断开时恢复。
 - 断开订阅直通时恢复原样，和现有断开一致。
@@ -80,7 +80,7 @@ magpie 现在处理 Claude 订阅请求的方式是在本机启动一个真实�
 - 凭据位置完全按 magpie 现有的保存方式给出，不假定账号数量，也不假定哪个账号在默认槽位（已确认，问题 C）：
   - 选中的是 Claude Code 当前自己登录的账号：凭据就在 Claude Code 默认的位置，返回"默认"；
   - 选中的是其他保存的账号：返回它的配置目录 `~/.config/magpie/claude-accounts/<id>`，目录不存在时按现有逻辑（`claudeSavedDir`）从 `logins.json` 建立。
-  - 哪个账号在默认位置由 magpie 实时判断，启动器 只照用接口的返回。
+  - 哪个账号在默认位置由 magpie 实时判断，启动器只照用接口的返回。
 - 选择逻辑复用现有的 `plan` + `weigh`（`fallback.go`、`routing.go`）：只按 Claude 订阅供应商自己的 `routing` 设置排序（智能 / 按顺序 / 轮流 / 最少使用 / pace），不用分组的设置（已确认，问题 H）；跳过休息中的账号、被 `accountModels` 排除的账号、关闭的账号。不使用会话亲和。
 - 每次选择写进路由记录，路由页可见。
 - 只接受本机请求。
@@ -139,7 +139,7 @@ Claude Code 请求里的账号身份（`metadata.user_id` 的 `account_uuid`）�
 |---|---|---|
 | **脱敏**（`redact`、`redactPersonal`、`redactWords`、`redactRules`，全局） | 脱敏要改写请求体，原样转发做不到 | 已确认：转发请求不脱敏，设置页注明（问题 B） |
 | **magpie 接入 Claude Code**（Agents 页给 Claude Code 选模型） | 接入后 Claude Code 发 `magpie` token、用 magpie 的模型名，请求不满足转发条件 | 已确认：订阅直通是一种新的接入模式，和模型接入互斥（问题 E） |
-| **自动切换登录**（`keepLogin`、`keepLoginAs`，`provider/codex_switch.go`） | 会改变哪个账号在默认位置 | 已确认：保留。启动器 启动的由 magpie 每次选账号，不经过启动器 启动的靠它换到有余量的账号（问题 F） |
+| **自动切换登录**（`keepLogin`、`keepLoginAs`，`provider/codex_switch.go`） | 会改变哪个账号在默认位置 | 已确认：保留。启动器启动的由 magpie 每次选账号，不经过启动器启动的靠它换到有余量的账号（问题 F） |
 | **请求存档**（`requestArchive`） | 存档本身只读，但会在回包里加一个 `X-Magpie-Archive-Id` 响应头，回包就不再是原样 | 转发请求照常存档，但不加这个响应头 |
 | **网关调用方密钥 / 局域网共享**（caller keys、`lan`、key limits） | 转发请求带的是订阅凭据，不是 magpie 密钥，无法识别调用方、套用额度限制；`identifyCaller` 还会把 `Authorization` 改写成 `Bearer magpie`，直接毁掉订阅凭据 | 只转发本机请求；本机请求不带 `sk-magpie-` 密钥时 `identifyCaller` 不会运行。远程机器不在本次范围内 |
 | **`maxConcurrency`** | 只排队，不改字节 | 已确认：对转发请求生效（问题 G） |
@@ -154,7 +154,7 @@ Claude Code 请求里的账号身份（`metadata.user_id` 的 `account_uuid`）�
 | A. 转发回包的额度信息 | 交给现有的 `provider.NoteClaudeLimits`，不改变其他额度获取逻辑 |
 | B. 脱敏开启时 | 转发请求不脱敏 |
 | C. 凭据位置 | 不假定账号数量、不假定哪个账号在默认槽位，完全按 magpie 现有的保存位置（见 4.2） |
-| D. 启动时 magpie 不可用 | 启动器 报错退出 |
+| D. 启动时 magpie 不可用 | 启动器报错退出 |
 | G. `maxConcurrency` | 对转发请求生效 |
 | H. 选账号用哪个路由设置 | 只用 Claude 订阅供应商自己的 `routing` |
 | E. 接入与转发 | 转发是 Claude Code 的一种新接入模式，写 settings.json，和模型接入互斥（见 4.1） |
@@ -171,7 +171,7 @@ Claude Code 请求里的账号身份（`metadata.user_id` 的 `account_uuid`）�
 - `ANTHROPIC_AUTH_TOKEN=magpie`：Claude Code 有了这个 token 就改用它，不再发订阅凭据，请求不满足转发条件；
 - `ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_*_MODEL` 等写成 magpie 的模型名（如 `claude/claude-opus-5-5[1m]`）；gateway 发现 settings.json 指向自己时，还会把 Claude Code 原生的 `claude-opus-…` 名字替换成这些模型（tier stand-in）。
 
-settings.json 的 `env` 对所有 Claude Code 会话生效，启动器 设置的环境变量压不过它（已实测，见第 2 节）。所以接入后，启动器 启动的 Claude Code 也会走回 magpie 的改写路径，转发静默失效。
+settings.json 的 `env` 对所有 Claude Code 会话生效，启动器设置的环境变量压不过它（已实测，见第 2 节）。所以接入后，启动器启动的 Claude Code 也会走回 magpie 的改写路径，转发静默失效。
 
 **可以做成兼容，但会扩大范围。** 接入的用处是让 Claude Code 能选 magpie 里其他供应商的模型（DeepSeek、Kimi 等）。如果新增一种"保留订阅登录"的接入方式（只写 `ANTHROPIC_BASE_URL`，不写 token、不改模型名），magpie 就可以按模型分流：Anthropic 原生模型走原样转发；选了其他供应商的模型，就按现有逻辑路由（忽略请求里的订阅凭据）。
 
@@ -188,9 +188,9 @@ settings.json 的 `env` 对所有 Claude Code 会话生效，启动器 设置的
 
 **和转发的关系：**
 
-- 目的重合：它是为了让"不经过 magpie 的 Claude Code"也能用到有余量的账号。走转发后，启动器 每次启动都由 magpie 按路由选账号，效果相同而且更细（每个进程一次），对 启动器 启动的 Claude Code 来说这个后台任务是多余的。
-- 仍有用处：不经过启动器 启动的 Claude Code（IDE 插件、按绝对路径启动等）仍然只能用默认位置的账号，靠这个任务换到有余量的账号。
-- 互相影响：后台任务会改变"哪个账号在默认位置"。选账号接口按 magpie 的实时状态返回位置（见 4.2），所以 启动器 拿到的位置总是对的。风险在于：一个用默认位置启动的会话正在运行时，后台任务把凭据搬走了。magpie 现有的说明是运行中的会话保持原账号，但 Claude Code 刷新 token 时会重新读写钥匙串，这一点没有验证过。这个风险在今天直连使用时就已经存在，不是转发引入的。
+- 目的重合：它是为了让"不经过 magpie 的 Claude Code"也能用到有余量的账号。走转发后，启动器每次启动都由 magpie 按路由选账号，效果相同而且更细（每个进程一次），对启动器启动的 Claude Code 来说这个后台任务是多余的。
+- 仍有用处：不经过启动器启动的 Claude Code（IDE 插件、按绝对路径启动等）仍然只能用默认位置的账号，靠这个任务换到有余量的账号。
+- 互相影响：后台任务会改变"哪个账号在默认位置"。选账号接口按 magpie 的实时状态返回位置（见 4.2），所以启动器拿到的位置总是对的。风险在于：一个用默认位置启动的会话正在运行时，后台任务把凭据搬走了。magpie 现有的说明是运行中的会话保持原账号，但 Claude Code 刷新 token 时会重新读写钥匙串，这一点没有验证过。这个风险在今天直连使用时就已经存在，不是转发引入的。
 
 结论：保留，两者并存，接受上面的风险。
 
@@ -281,7 +281,7 @@ settings.json 的 `env` 对所有 Claude Code 会话生效，启动器 设置的
 | **代理页 · 断开确认框**（`askDisconnect` 726） | 文案是「端点、密钥、模型和 effort」 | 增加订阅直通版本的文案 |
 | **代理页 · 配置漂移提示**（`driftFix` 698，`DRIFT_WHY` 710–714；后端 `Drift()`） | 只检测 magpie 模型被改掉 | 增加订阅直通的漂移：base URL 被删、token 或模型名被加回导致直通失效 |
 | **代理页 · 「直连 Anthropic，不经过 magpie」说明**（`directSaid` 203，`commit()` 2653） | 原生模型一律标为不经过 magpie | 订阅直通时改为「经 magpie 原样转发」 |
-| **代理页 · 启动命令**（可复用 agy 的 `launchButton` 1508） | Claude Code 没有 | 订阅直通时提供 启动器 的启动命令，并提示已运行的会话要重启才生效 |
+| **代理页 · 启动命令**（可复用 agy 的 `launchButton` 1508） | Claude Code 没有 | 订阅直通时提供启动器的启动命令，并提示已运行的会话要重启才生效 |
 | **设置 · 隐私 / 脱敏**（`renderRedact` 13094） | 脱敏对所有请求生效 | 注明 Claude Code 订阅直通的请求不脱敏 |
 | **用量页 · 请求明细**（`renderLedger` 10418，徽标 10547–10553，详情 `ledDetail` 9941；API `ledgerPage`） | 订阅账号显示「订阅账号」徽标 | 增加「直通」徽标；详情里显示模式。需要在用量记录里加一个字段标记直通 |
 | **用量页 · 去重**（`internal/usage/request_page.go`，`visibleLocal`、`matchKey`） | 会话日志的记录和网关记录按规则合并 | 直通请求两边都有记录，必须合并成一条，否则重复计数 |
@@ -357,7 +357,7 @@ settings.json 的 `env` 对所有 Claude Code 会话生效，启动器 设置的
 
 - **配置档（profiles）**：配置档记录 Claude Code 的接入模式。保存时一并保存；应用一个保存了订阅直通的配置档时切到订阅直通，应用保存了模型的配置档时切回模型接入。没有这个字段的旧配置档按现在的方式处理（只应用字段值）。理由：配置档的用途是「快照每个代理的设置」，不记录模式的话，应用一个旧配置档会静默退出订阅直通。
 - **Claude Desktop 的 Code 标签页**：接受它一起走订阅直通。它运行的就是 Claude Code、读同一个 settings.json、用自己的订阅登录，走转发正好符合「统一都走」，它的流量也能统计。代价是 magpie 没运行时它也连不上。实现时要实测它发出的请求是否满足识别条件（尤其是 `User-Agent` 是否以 `claude-cli/` 开头），不满足就调整识别条件。
-- **菜单栏的「使用中的账号」**：保持现有含义，显示 Claude Code 当前登录的账号（不经过启动器 启动时用的那个）。订阅直通时把标签改为「已登录账号」，避免误以为所有会话都在用它；不新增其他信息。
+- **菜单栏的「使用中的账号」**：保持现有含义，显示 Claude Code 当前登录的账号（不经过启动器启动时用的那个）。订阅直通时把标签改为「已登录账号」，避免误以为所有会话都在用它；不新增其他信息。
 - **会话页**：直通请求在会话详情里以 `claude/<模型>` 出现，和 bridge 的显示一致，不改。
 
 ### 8.4 文案与测试
