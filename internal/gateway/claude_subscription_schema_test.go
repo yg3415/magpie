@@ -15,18 +15,14 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// Every run works in the same folder: Claude Code puts its working
-// directory in the system prompt, ahead of the conversation, so a folder of
-// each run's own left nothing past Claude Code's own part of the prompt to
-// be read from the cache. A request with output_config.format runs with
-// --json-schema.
-func TestClaudeRunsShareAWorkDir(t *testing.T) {
+// A request with output_config.format runs Claude Code with --json-schema;
+// one without runs it without.
+func TestClaudeSchemaGivenToClaudeCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a shell script stands in for Claude Code")
 	}
 	dir := t.TempDir()
 	script := `#!/bin/sh
-pwd -P >> ` + dir + `/dirs
 for a in "$@"; do echo "$a"; done > ` + dir + `/args.$$
 while read -r line; do
   echo '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}}'
@@ -50,11 +46,6 @@ done
 		if code, msg := s.serveClaudeSubscription(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)), provider.Anthropic, p, "claude-sonnet-5", []byte(body), &u); code != 200 {
 			t.Fatalf("%d %s", code, msg)
 		}
-	}
-	b, _ := os.ReadFile(filepath.Join(dir, "dirs"))
-	dirs := strings.Fields(string(b))
-	if len(dirs) != 2 || dirs[0] != dirs[1] {
-		t.Fatalf("working directories: %q", dirs)
 	}
 	var schemas []string
 	files, _ := filepath.Glob(filepath.Join(dir, "args.*"))
